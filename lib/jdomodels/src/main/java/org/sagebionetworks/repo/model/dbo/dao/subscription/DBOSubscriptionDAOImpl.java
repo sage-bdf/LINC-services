@@ -4,7 +4,8 @@ import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_DISCUSSI
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_DISCUSSION_THREAD_ID;
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_DISCUSSION_THREAD_IS_DELETED;
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_FORUM_ID;
-import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_FORUM_PROJECT_ID;
+import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_FORUM_OBJECT_ID;
+import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_FORUM_OBJECT_TYPE;
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_NOTIFICATION_EMAIL_ALIAS_ID;
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_PRINCIPAL_ALIAS_DISPLAY;
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_PRINCIPAL_ALIAS_ID;
@@ -48,29 +49,33 @@ import org.sagebionetworks.repo.model.subscription.SubscriptionObjectType;
 import org.sagebionetworks.repo.transactions.WriteTransaction;
 import org.sagebionetworks.repo.web.NotFoundException;
 import org.sagebionetworks.util.ValidateArgument;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.ParameterizedPreparedStatementSetter;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.stereotype.Repository;
 
+@Repository
 public class DBOSubscriptionDAOImpl implements SubscriptionDAO{
 
 	public static final String OFFSET = "offset";
 	public static final String LIMIT = "limit";
-	public static final String PROJECT_IDS = "projectIds";
-	public static final String OBJECT_IDS = "objectIds";
+	public static final String FORUM_OBJECT_IDS = "projectIds";
+	public static final String SUBSCRIPTION_OBJECT_IDS = "objectIds";
 	public static final String OBJECT_TYPE = "objectType";
 	public static final String SUBSCRIBER_ID = "subscriberId";
-	
-	@Autowired
-	private JdbcTemplate jdbcTemplate;
-	@Autowired
-	private NamedParameterJdbcTemplate namedTemplate;
-	@Autowired
-	private IdGenerator idGenerator;
+
+	private final JdbcTemplate jdbcTemplate;
+	private final NamedParameterJdbcTemplate namedTemplate;
+	private final IdGenerator idGenerator;
+
+	public DBOSubscriptionDAOImpl(JdbcTemplate jdbcTemplate, NamedParameterJdbcTemplate namedTemplate, IdGenerator idGenerator) {
+		this.jdbcTemplate = jdbcTemplate;
+		this.namedTemplate = namedTemplate;
+		this.idGenerator = idGenerator;
+	}
 	
 	private static final String SQL_GET_EMAIL_SUBSCRIBERS = "SELECT S."
 			+ COL_SUBSCRIPTION_ID + ", S." + COL_SUBSCRIPTION_SUBSCRIBER_ID
@@ -112,15 +117,17 @@ public class DBOSubscriptionDAOImpl implements SubscriptionDAO{
 			+ "AND "+COL_SUBSCRIPTION_OBJECT_ID+" = ? "
 			+ "AND "+COL_SUBSCRIPTION_OBJECT_TYPE+" = ?";
 
-	private static final String SQL_GET_PROJECT_FORUM_SUB = "SELECT "+TABLE_FORUM+"."+COL_FORUM_PROJECT_ID+" "
+	private static final String SQL_GET_PROJECT_FORUM_SUB = "SELECT "+TABLE_FORUM+"."+COL_FORUM_OBJECT_ID+" "
 			+"FROM "+TABLE_SUBSCRIPTION+", "+TABLE_FORUM+" "
 			+ "WHERE "+TABLE_SUBSCRIPTION+"."+COL_SUBSCRIPTION_OBJECT_ID+" = "+TABLE_FORUM+"."+COL_FORUM_ID+" "
+			+ "AND "+TABLE_FORUM+"."+COL_FORUM_OBJECT_TYPE+" = 'ENTITY' "
 			+ "AND "+TABLE_SUBSCRIPTION+"."+COL_SUBSCRIPTION_SUBSCRIBER_ID+" = ? ";
 
-	private static final String SQL_GET_PROJECT_THREAD_SUB = "SELECT "+TABLE_FORUM+"."+COL_FORUM_PROJECT_ID+" "
+	private static final String SQL_GET_PROJECT_THREAD_SUB = "SELECT "+TABLE_FORUM+"."+COL_FORUM_OBJECT_ID+" "
 			+ "FROM "+TABLE_SUBSCRIPTION+", "+TABLE_DISCUSSION_THREAD+", "+TABLE_FORUM+" "
 			+ "WHERE "+TABLE_SUBSCRIPTION+"."+COL_SUBSCRIPTION_OBJECT_ID+" = "+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_ID+" "
 			+ "AND "+TABLE_FORUM+"."+COL_FORUM_ID+" = "+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_FORUM_ID+" "
+			+ "AND "+TABLE_FORUM+"."+COL_FORUM_OBJECT_TYPE+" = 'ENTITY' "
 			+ "AND "+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_IS_DELETED+" = "+Boolean.FALSE.toString()+" "
 			+ "AND "+TABLE_SUBSCRIPTION+"."+COL_SUBSCRIPTION_SUBSCRIBER_ID+" = ? ";
 
@@ -338,10 +345,10 @@ public class DBOSubscriptionDAOImpl implements SubscriptionDAO{
 		parameters.addValue(SUBSCRIBER_ID, request.getSubscriberId());
 		parameters.addValue(OBJECT_TYPE, request.getObjectType().name());
 		if(request.getObjectIds() != null) {
-			parameters.addValue(OBJECT_IDS, request.getObjectIds());
+			parameters.addValue(SUBSCRIPTION_OBJECT_IDS, request.getObjectIds());
 		}
 		if(request.getProjectIds() != null) {
-			parameters.addValue(PROJECT_IDS, request.getProjectIds());
+			parameters.addValue(FORUM_OBJECT_IDS, request.getProjectIds());
 		}
 		if(request.getLimit() != null) {
 			parameters.addValue(LIMIT, request.getLimit());
@@ -402,7 +409,7 @@ public class DBOSubscriptionDAOImpl implements SubscriptionDAO{
 		builder.append(" WHERE S.").append(COL_SUBSCRIPTION_OBJECT_TYPE).append(" = :").append(OBJECT_TYPE);
 		builder.append(" AND S.").append(COL_SUBSCRIPTION_SUBSCRIBER_ID).append(" = :").append(SUBSCRIBER_ID);
 		if(request.getObjectIds() != null) {
-			builder.append(" AND S.").append(COL_SUBSCRIPTION_OBJECT_ID).append(" IN (:").append(OBJECT_IDS).append(")");
+			builder.append(" AND S.").append(COL_SUBSCRIPTION_OBJECT_ID).append(" IN (:").append(SUBSCRIPTION_OBJECT_IDS).append(")");
 		}
 	}
 
@@ -420,7 +427,8 @@ public class DBOSubscriptionDAOImpl implements SubscriptionDAO{
 			builder.append(" JOIN ").append(TABLE_FORUM).append(" F");
 			builder.append(" ON (S.").append(COL_SUBSCRIPTION_OBJECT_ID).append(" = F.").append(COL_FORUM_ID);
 			if (projectIds != null) {
-				builder.append(" AND F.").append(COL_FORUM_PROJECT_ID).append(" IN (:").append(PROJECT_IDS).append(")");
+				builder.append(" AND F.").append(COL_FORUM_OBJECT_TYPE).append(" = 'ENTITY'");
+				builder.append(" AND F.").append(COL_FORUM_OBJECT_ID).append(" IN (:").append(FORUM_OBJECT_IDS).append(")");
 			}
 			builder.append(")");
 			break;
@@ -432,7 +440,8 @@ public class DBOSubscriptionDAOImpl implements SubscriptionDAO{
 			if(projectIds != null) {
 				builder.append(" JOIN ").append(TABLE_FORUM).append(" F");
 				builder.append(" ON (T.").append(COL_DISCUSSION_THREAD_FORUM_ID).append(" = F.").append(COL_FORUM_ID);
-				builder.append(" AND F.").append(COL_FORUM_PROJECT_ID).append(" IN (:").append(PROJECT_IDS).append("))");
+				builder.append(" AND F.").append(COL_FORUM_OBJECT_TYPE).append(" = 'ENTITY'");
+				builder.append(" AND F.").append(COL_FORUM_OBJECT_ID).append(" IN (:").append(FORUM_OBJECT_IDS).append("))");
 			}
 			break;
 		default:

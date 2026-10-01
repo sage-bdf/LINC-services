@@ -445,10 +445,10 @@ public class TeamManagerImplTest {
 		when(mockTeamDAO.get(team1.getId())).thenReturn(new Team());
 		when(mockTeamDAO.get(team2.getId())).thenReturn(new Team());
 		when(mockPrincipalManager.isAliasValid(any(String.class), eq(AliasType.TEAM_NAME))).thenReturn(true);
-		Mockito.verifyZeroInteractions(mockTeamDAO);
-		Mockito.verifyZeroInteractions(mockBasicDAO);
-		Mockito.verifyZeroInteractions(mockPrincipalAliasDAO);
-		Mockito.verifyZeroInteractions(mockAclManager);
+		Mockito.verifyNoMoreInteractions(mockTeamDAO);
+		Mockito.verifyNoMoreInteractions(mockBasicDAO);
+		Mockito.verifyNoMoreInteractions(mockPrincipalAliasDAO);
+		Mockito.verifyNoMoreInteractions(mockAclManager);
 
 		teamManagerImpl.setTeamsToBootstrap(toBootstrap);
 		teamManagerImpl.bootstrapTeams();
@@ -705,12 +705,12 @@ public class TeamManagerImplTest {
 		assertEquals(teamManagerImpl.canAddTeamMember(userInfo, "234", otherUserInfo, false), TeamManagerImpl.UNAUTHORIZED_ADD_TEAM_MEMBER_UNMET_REALM);
 
 		//test member to be added in different realm
-		otherUserInfo.setRealmId("11");
+		otherUserInfo = UserInfoTestHelper.createUserInfo(false, otherPrincipalId, "11");
 		assertEquals(teamManagerImpl.canAddTeamMember(userInfo, TEAM_ID, otherUserInfo, false), TeamManagerImpl.UNAUTHORIZED_ADD_TEAM_MEMBER_UNMET_REALM);
 
 		//test user adding member is in different realm
-		otherUserInfo.setRealmId(REALM_ID);
-		userInfo.setRealmId("11");
+		otherUserInfo = UserInfoTestHelper.createUserInfo(false, otherPrincipalId, REALM_ID);
+		userInfo = UserInfoTestHelper.createUserInfo(false, MEMBER_PRINCIPAL_ID_LONG, "11");
 		assertEquals(teamManagerImpl.canAddTeamMember(userInfo, TEAM_ID, otherUserInfo, false), TeamManagerImpl.UNAUTHORIZED_ADD_TEAM_MEMBER_UNMET_REALM);
 	}
 
@@ -815,11 +815,93 @@ public class TeamManagerImplTest {
 		acl.getResourceAccess().add(TeamManagerImpl.createResourceAccess(Long.parseLong(memberPrincipalId), Collections.singleton(ACCESS_TYPE.TEAM_MEMBERSHIP_UPDATE)));
 		acl.getResourceAccess().add(TeamManagerImpl.createResourceAccess(Long.parseLong("000"), Collections.singleton(ACCESS_TYPE.TEAM_MEMBERSHIP_UPDATE)));
 		when(mockAclManager.getAcl(TEAM_ID, ObjectType.TEAM)).thenReturn(Optional.of(acl));
-		Team team = new Team().setId(TEAM_ID).setCreatedBy(userInfo.getId().toString());
-		when(mockTeamDAO.get(TEAM_ID)).thenReturn(team);
 		teamManagerImpl.removeMember(userInfo, TEAM_ID, memberPrincipalId);
 		verify(mockGroupMembersDAO).removeMembers(TEAM_ID, Arrays.asList(new String[]{memberPrincipalId}));
-		verify(mockAclManager).update(eq(userInfo), (AccessControlList)any(), eq(ObjectType.TEAM), eq(Long.parseLong(team.getCreatedBy())));
+		verify(mockAclDAO).update(acl, ObjectType.TEAM);
+		assertEquals(1, acl.getResourceAccess().size());
+	}
+
+	@Test
+	public void testRemoveMemberWithMemberNotInACL() {
+		String memberPrincipalId = "987";
+		when(mockAuthorizationManager.canAccess(userInfo, TEAM_ID, ObjectType.TEAM, ACCESS_TYPE.TEAM_MEMBERSHIP_UPDATE))
+				.thenReturn(AuthorizationStatus.authorized());
+		when(mockGroupMembersDAO.getMemberIdsForUpdate(Long.valueOf(TEAM_ID)))
+				.thenReturn(ImmutableSet.of(Long.valueOf(memberPrincipalId), 0L));
+		AccessControlList acl = new AccessControlList();
+		acl.setResourceAccess(new HashSet<ResourceAccess>());
+		// the leaving member is NOT in the ACL; calling user holds the team-admin permission
+		acl.getResourceAccess().add(TeamManagerImpl.createResourceAccess(userInfo.getId(), Collections.singleton(ACCESS_TYPE.TEAM_MEMBERSHIP_UPDATE)));
+		when(mockAclManager.getAcl(TEAM_ID, ObjectType.TEAM)).thenReturn(Optional.of(acl));
+
+		// call under test
+		teamManagerImpl.removeMember(userInfo, TEAM_ID, memberPrincipalId);
+
+		verify(mockGroupMembersDAO).removeMembers(TEAM_ID, List.of(memberPrincipalId));
+		verify(mockAclDAO, never()).update(any(AccessControlList.class), any(ObjectType.class));
+		assertEquals(1, acl.getResourceAccess().size());
+	}
+
+	@Test
+	public void testRemoveMemberWithSelfNotInACL() {
+		// PLFM-9596: a non-manager leaving the team. Caller == target principal, and caller is not in the ACL.
+		when(mockGroupMembersDAO.getMemberIdsForUpdate(Long.valueOf(TEAM_ID))).thenReturn(ImmutableSet.of(userInfo.getId(), 0L));
+		AccessControlList acl = new AccessControlList();
+		acl.setResourceAccess(new HashSet<ResourceAccess>());
+		// some other principal is the team admin; the leaving user is not in the ACL
+		acl.getResourceAccess().add(TeamManagerImpl.createResourceAccess(Long.parseLong("000"), Collections.singleton(ACCESS_TYPE.TEAM_MEMBERSHIP_UPDATE)));
+		when(mockAclManager.getAcl(TEAM_ID, ObjectType.TEAM)).thenReturn(Optional.of(acl));
+
+		// call under test: user removes themselves
+		teamManagerImpl.removeMember(userInfo, TEAM_ID, userInfo.getId().toString());
+
+		verify(mockGroupMembersDAO).removeMembers(TEAM_ID, List.of(userInfo.getId().toString()));
+		verify(mockAclDAO, never()).update(any(AccessControlList.class), any(ObjectType.class));
+		assertEquals(1, acl.getResourceAccess().size());
+	}
+
+	@Test
+	public void testRemoveMemberWithSelfInACLAsNonManager() {
+		// caller is in the ACL with SEND_MESSAGE only (not a team manager) and removes themselves
+		when(mockGroupMembersDAO.getMemberIdsForUpdate(Long.valueOf(TEAM_ID))).thenReturn(Set.of(0L, userInfo.getId()));
+		AccessControlList acl = new AccessControlList();
+		acl.setResourceAccess(new HashSet<ResourceAccess>());
+		// the leaving user has SEND_MESSAGE only — not a team manager
+		acl.getResourceAccess().add(TeamManagerImpl.createResourceAccess(MEMBER_PRINCIPAL_ID_LONG, Collections.singleton(ACCESS_TYPE.SEND_MESSAGE)));
+		// a different principal holds TEAM_MEMBERSHIP_UPDATE so the team-admin invariant holds after removal
+		acl.getResourceAccess().add(TeamManagerImpl.createResourceAccess(0, Collections.singleton(ACCESS_TYPE.TEAM_MEMBERSHIP_UPDATE)));
+		when(mockAclManager.getAcl(TEAM_ID, ObjectType.TEAM)).thenReturn(Optional.of(acl));
+
+		// call under test: user removes themselves
+		teamManagerImpl.removeMember(userInfo, TEAM_ID, userInfo.getId().toString());
+
+		verify(mockGroupMembersDAO).removeMembers(TEAM_ID, List.of(MEMBER_PRINCIPAL_ID));
+		// ACL changed (user's SEND_MESSAGE entry was removed) — update IS called via the DAO
+		verify(mockAclDAO).update(acl, ObjectType.TEAM);
+		// user is no longer in the ACL
+		assertEquals(1, acl.getResourceAccess().size());
+	}
+
+	@Test
+	public void testRemoveMemberWithSelfAsManagerAndOtherManagerExists() {
+		// caller is a team manager, removes themselves, and another manager remains — should succeed
+		when(mockGroupMembersDAO.getMemberIdsForUpdate(Long.valueOf(TEAM_ID))).thenReturn(Set.of(userInfo.getId(), 0L));
+		AccessControlList acl = new AccessControlList();
+		acl.setResourceAccess(new HashSet<ResourceAccess>());
+		// caller is a manager
+		acl.getResourceAccess().add(TeamManagerImpl.createResourceAccess(userInfo.getId(), Collections.singleton(ACCESS_TYPE.TEAM_MEMBERSHIP_UPDATE)));
+		// another manager exists, so the team-admin invariant holds after the caller leaves
+		acl.getResourceAccess().add(TeamManagerImpl.createResourceAccess(0L, Collections.singleton(ACCESS_TYPE.TEAM_MEMBERSHIP_UPDATE)));
+		when(mockAclManager.getAcl(TEAM_ID, ObjectType.TEAM)).thenReturn(Optional.of(acl));
+
+		// call under test: manager removes themselves
+		teamManagerImpl.removeMember(userInfo, TEAM_ID, userInfo.getId().toString());
+
+		verify(mockGroupMembersDAO).removeMembers(TEAM_ID, List.of(userInfo.getId().toString()));
+		// ACL changed — update IS called via the DAO (bypassing the validateACLContent guard that would
+		// otherwise block a manager from removing their own ACL editing permission)
+		verify(mockAclDAO).update(acl, ObjectType.TEAM);
+		// caller is no longer in the ACL, the other manager remains
 		assertEquals(1, acl.getResourceAccess().size());
 	}
 
@@ -1252,43 +1334,72 @@ public class TeamManagerImplTest {
 	}
 
 	@Test
-	public void testSetPermissions() {
-		when(mockAuthorizationManager.canAccess(userInfo, TEAM_ID, ObjectType.TEAM, ACCESS_TYPE.UPDATE)).thenReturn(AuthorizationStatus.authorized());
+	public void testSetPermissionsWithIsTeamManagerTrue() {
+		when(mockAuthorizationManager.canAccess(userInfo, TEAM_ID, ObjectType.TEAM, ACCESS_TYPE.UPDATE))
+				.thenReturn(AuthorizationStatus.authorized());
 		AccessControlList acl = TeamManagerImpl.createInitialAcl(userInfo, TEAM_ID, new Date());
 		when(mockAclManager.getAcl(TEAM_ID, ObjectType.TEAM)).thenReturn(Optional.of(acl));
-		when(mockTeamDAO.get(TEAM_ID)).thenReturn(new Team().setId(TEAM_ID).setCreatedBy(userInfo.getId().toString()));
 		String principalId = "321";
+
+		// call under test: promote principalId to team manager
 		teamManagerImpl.setPermissions(userInfo, TEAM_ID, principalId, true);
-		verify(mockAclManager).update(userInfo, acl, ObjectType.TEAM, userInfo.getId());
-		// now check that user is actually an admin
-		boolean foundRA=false;
-		for (ResourceAccess ra: acl.getResourceAccess()) {
-			if (principalId.equals(ra.getPrincipalId().toString())) {
-				foundRA=true;
-				for (ACCESS_TYPE at : ModelConstants.TEAM_ADMIN_PERMISSIONS) {
-					assertTrue(ra.getAccessType().contains(at));
-				}
-			}
-		}
-		assertTrue(foundRA);
-		
-		// now remove admin permissions
-		teamManagerImpl.setPermissions(userInfo, TEAM_ID, principalId, false);
-		foundRA=false;
-		for (ResourceAccess ra: acl.getResourceAccess()) {
-			if (principalId.equals(ra.getPrincipalId().toString())) {
-				foundRA=true;
-			}
-		}
-		assertFalse(foundRA);
+
+		ArgumentCaptor<AccessControlList> captor = ArgumentCaptor.forClass(AccessControlList.class);
+		verify(mockAclDAO).update(captor.capture(), eq(ObjectType.TEAM));
+		AccessControlList captured = captor.getValue();
+
+		ResourceAccess promoted = captured.getResourceAccess().stream()
+				.filter(ra -> principalId.equals(ra.getPrincipalId().toString()))
+				.findFirst()
+				.orElse(null);
+		assertNotNull(promoted);
+		assertEquals(ModelConstants.TEAM_ADMIN_PERMISSIONS, promoted.getAccessType());
 	}
-	
+
+	@Test
+	public void testSetPermissionsWithIsTeamManagerFalse() {
+		when(mockAuthorizationManager.canAccess(userInfo, TEAM_ID, ObjectType.TEAM, ACCESS_TYPE.UPDATE))
+				.thenReturn(AuthorizationStatus.authorized());
+		AccessControlList acl = TeamManagerImpl.createInitialAcl(userInfo, TEAM_ID, new Date());
+		String principalId = "321";
+		// start with principalId already in the ACL as a team manager
+		acl.getResourceAccess().add(TeamManagerImpl.createResourceAccess(Long.parseLong(principalId), ModelConstants.TEAM_ADMIN_PERMISSIONS));
+		when(mockAclManager.getAcl(TEAM_ID, ObjectType.TEAM)).thenReturn(Optional.of(acl));
+
+		// call under test: demote principalId back to non-manager
+		teamManagerImpl.setPermissions(userInfo, TEAM_ID, principalId, false);
+
+		ArgumentCaptor<AccessControlList> captor = ArgumentCaptor.forClass(AccessControlList.class);
+		verify(mockAclDAO).update(captor.capture(), eq(ObjectType.TEAM));
+		AccessControlList captured = captor.getValue();
+
+		boolean stillPresent = captured.getResourceAccess().stream()
+				.anyMatch(ra -> principalId.equals(ra.getPrincipalId().toString()));
+		assertFalse(stillPresent);
+	}
+
+	@Test
+	public void testSetPermissionsWithNoChange() {
+		when(mockAuthorizationManager.canAccess(userInfo, TEAM_ID, ObjectType.TEAM, ACCESS_TYPE.UPDATE)).thenReturn(AuthorizationStatus.authorized());
+		AccessControlList acl = new AccessControlList();
+		acl.setResourceAccess(new HashSet<ResourceAccess>());
+		// the ACL already has a team admin (not the principalId being set), so the team-admin invariant holds
+		acl.getResourceAccess().add(TeamManagerImpl.createResourceAccess(MEMBER_PRINCIPAL_ID_LONG, Collections.singleton(ACCESS_TYPE.TEAM_MEMBERSHIP_UPDATE)));
+		when(mockAclManager.getAcl(TEAM_ID, ObjectType.TEAM)).thenReturn(Optional.of(acl));
+		String principalId = "321"; // not in ACL
+
+		// call under test: isAdmin=false and principal not in ACL => ACL doesn't change
+		teamManagerImpl.setPermissions(userInfo, TEAM_ID, principalId, false);
+
+		verify(mockAclManager, never()).update(any(UserInfo.class), any(AccessControlList.class), any(ObjectType.class), any());
+		verify(mockTeamDAO, never()).get(TEAM_ID);
+	}
+
 	@Test
 	public void testSetRemoveOwnPermissions() {
 		when(mockAuthorizationManager.canAccess(userInfo, TEAM_ID, ObjectType.TEAM, ACCESS_TYPE.UPDATE)).thenReturn(AuthorizationStatus.authorized());
 		AccessControlList acl = TeamManagerImpl.createInitialAcl(userInfo, TEAM_ID, new Date());
 		when(mockAclManager.getAcl(TEAM_ID, ObjectType.TEAM)).thenReturn(Optional.of(acl));
-		when(mockTeamDAO.get(TEAM_ID)).thenReturn(new Team().setId(TEAM_ID).setCreatedBy(userInfo.getId().toString()));
 		String principalId = MEMBER_PRINCIPAL_ID; // add SELF as admin
 		
 		teamManagerImpl.setPermissions(userInfo, TEAM_ID, principalId, true);

@@ -45,6 +45,7 @@ public class ColumnModelUtils {
 			.alias("ColumnType", ColumnType.class)
 			.alias("ColumnChange", ColumnChange.class)
 			.allowTypes(ColumnModel.class, ColumnType.class, ColumnChange.class)
+			.allowTypesByWildcard(new String[] {"org.sagebionetworks.repo.model.**"})
 			.build();
 	/**
 	 * Translate from a DTO to DBO.
@@ -300,17 +301,24 @@ public class ColumnModelUtils {
 		validateFacetSortConfig(sub);
 	}
 
-	static void validateListLengthForClone(ColumnModel clone){
-		if(clone.getMaximumListLength() == null){
-			// Use the default value
-			clone.setMaximumListLength(ColumnConstants.MAX_ALLOWED_LIST_LENGTH);
-		}else if(clone.getMaximumListLength() > ColumnConstants.MAX_ALLOWED_LIST_LENGTH){
-			// The max is beyond the allowed size
-			throw new IllegalArgumentException("ColumnModel.maximumListLength for a LIST column cannot exceed: "+ColumnConstants.MAX_ALLOWED_LIST_LENGTH);
-		} else if (clone.getMaximumListLength() < 2) {
-			// The max is beyond the allowed size
-			throw new IllegalArgumentException("ColumnModel.maximumListLength for a LIST column must be at least 2");
+	static void validateListLengthForClone(ColumnModel clone) {
+		if (clone.getMaximumListLength() == null) {
+			clone.setMaximumListLength(ColumnConstants.DEFAULT_LIST_LENGTH);
+		} else if (clone.getMaximumListLength() < ColumnConstants.MINIMUM_LIST_LENGTH) {
+			throw new IllegalArgumentException("ColumnModel.maximumListLength for a LIST column must be at least " + ColumnConstants.MINIMUM_LIST_LENGTH);
+		} else if (ColumnTypeListMappings.isList(clone.getColumnType())) {
+			long maxCharsPerElement = getMaxCharsPerListElement(clone);
+			long maxAllowedLength = ColumnConstants.MAX_ALLOWED_LIST_TOTAL_CHARACTERS / maxCharsPerElement;
+			if (clone.getMaximumListLength() > maxAllowedLength) {
+				throw new IllegalArgumentException("ColumnModel.maximumListLength for a " + clone.getColumnType()
+						+ " column cannot exceed: " + maxAllowedLength);
+			}
 		}
+	}
+
+	static long getMaxCharsPerListElement(ColumnModel column) {
+		return ColumnTypeListMappings.forListType(column.getColumnType())
+				.getEffectiveMaxCharsPerItem(column.getMaximumSize());
 	}
 
 	

@@ -903,7 +903,7 @@ public class SQLUtilsTest {
 				"ALTER TABLE TEMPT999 ADD COLUMN _C456_ JSON DEFAULT NULL COMMENT 'BOOLEAN_LIST',"
 				+ " ADD CONSTRAINT CHECK (JSON_SCHEMA_VALID('"
 				+ "{ \"type\": \"array\", \"items\": { \"maxLength\": null }, \"maxItems\": null }', _C456_))",
-				"UPDATE TEMPT999 SET _C456_ = JSON_ARRAY(_C123_)",
+				"UPDATE TEMPT999 SET _C456_ = IF(_C123_ IS NULL, NULL, JSON_ARRAY(_C123_))",
 				"ALTER TABLE TEMPT999 DROP COLUMN _C123_"
 		};
 		// call under test
@@ -942,7 +942,7 @@ public class SQLUtilsTest {
 				"ALTER TABLE T999 ADD COLUMN _C456_ JSON DEFAULT NULL COMMENT 'BOOLEAN_LIST',"
 				+ " ADD CONSTRAINT CHECK (JSON_SCHEMA_VALID('"
 				+ "{ \"type\": \"array\", \"items\": { \"maxLength\": null }, \"maxItems\": null }', _C456_))",
-				"UPDATE T999 SET _C456_ = JSON_ARRAY(_C123_)",
+				"UPDATE T999 SET _C456_ = IF(_C123_ IS NULL, NULL, JSON_ARRAY(_C123_))",
 				"ALTER TABLE T999 DROP COLUMN _C123_"
 		};
 		// call under test
@@ -1266,7 +1266,7 @@ public class SQLUtilsTest {
 		IndexChange changes = SQLUtils.calculateIndexOptimization(list, tableId, maxNumberOfIndex);
 		
 		assertEquals(0, changes.getToAdd().size());
-		assertEquals(8, changes.getToRemove().size());
+		assertEquals(9, changes.getToRemove().size());
 		assertEquals(0, changes.getToRename().size());
 	}
 	
@@ -2863,7 +2863,7 @@ public class SQLUtilsTest {
 		assertEquals("ALTER TABLE T999 ADD COLUMN _C456_ JSON DEFAULT NULL COMMENT 'BOOLEAN_LIST',"
 				+ " ADD CONSTRAINT CHECK (JSON_SCHEMA_VALID('"
 				+ "{ \"type\": \"array\", \"items\": { \"maxLength\": null }, \"maxItems\": null }', _C456_))", results.get(0));
-		assertEquals("UPDATE T999 SET _C456_ = JSON_ARRAY(_C123_)", results.get(1));
+		assertEquals("UPDATE T999 SET _C456_ = IF(_C123_ IS NULL, NULL, JSON_ARRAY(_C123_))", results.get(1));
 		assertEquals("ALTER TABLE T999 DROP COLUMN _C123_", results.get(2));
 	}
 	

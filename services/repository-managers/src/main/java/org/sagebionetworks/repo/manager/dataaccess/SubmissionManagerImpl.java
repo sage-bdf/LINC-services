@@ -18,6 +18,9 @@ import org.sagebionetworks.repo.model.AccessRequirement;
 import org.sagebionetworks.repo.model.AccessRequirementDAO;
 import org.sagebionetworks.repo.model.ApprovalState;
 import org.sagebionetworks.repo.model.AuthorizationUtils;
+import org.sagebionetworks.repo.model.HasAccessorRequirement;
+import org.sagebionetworks.repo.model.HasDataUseCertificate;
+import org.sagebionetworks.repo.model.HasExpiration;
 import org.sagebionetworks.repo.model.ManagedACTAccessRequirement;
 import org.sagebionetworks.repo.model.NextPageToken;
 import org.sagebionetworks.repo.model.ObjectType;
@@ -53,13 +56,23 @@ import org.sagebionetworks.repo.model.dataaccess.SubmissionStatus;
 import org.sagebionetworks.repo.model.dataaccess.UserSubmissionSearchRequest;
 import org.sagebionetworks.repo.model.dataaccess.UserSubmissionSearchResponse;
 import org.sagebionetworks.repo.model.dataaccess.UserSubmissionSearchResult;
+import org.sagebionetworks.ids.IdGenerator;
+import org.sagebionetworks.ids.IdType;
+import org.sagebionetworks.repo.model.AuthorizationConstants.BOOTSTRAP_PRINCIPAL;
+import org.sagebionetworks.repo.model.UploadContentToS3DAO;
+import org.sagebionetworks.repo.model.dbo.dao.AccessRequirementUtils;
 import org.sagebionetworks.repo.model.dbo.dao.dataaccess.ResearchProjectDAO;
 import org.sagebionetworks.repo.model.dbo.dao.dataaccess.SubmissionDAO;
+import org.sagebionetworks.repo.model.dbo.dao.discussion.DiscussionThreadDAO;
+import org.sagebionetworks.repo.model.dbo.dao.discussion.ForumDAO;
+import org.sagebionetworks.repo.model.discussion.Forum;
+import org.sagebionetworks.repo.model.discussion.ForumObjectType;
 import org.sagebionetworks.repo.model.message.ChangeType;
 import org.sagebionetworks.repo.model.message.MessageToSend;
 import org.sagebionetworks.repo.model.message.TransactionalMessenger;
 import org.sagebionetworks.repo.model.subscription.SubscriptionObjectType;
 import org.sagebionetworks.repo.transactions.WriteTransaction;
+import org.sagebionetworks.repo.web.NotFoundException;
 import org.sagebionetworks.util.ValidateArgument;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -78,12 +91,17 @@ public class SubmissionManagerImpl implements SubmissionManager{
 	private TransactionalMessenger transactionalMessenger;
 	private AccessApprovalManager accessAprovalManager;
 	private DataAccessAuthorizationManager authorizationManager;
-	
+	private ForumDAO forumDao;
+	private DiscussionThreadDAO threadDao;
+	private UploadContentToS3DAO uploadDao;
+	private IdGenerator idGenerator;
+
 	@Autowired
 	public SubmissionManagerImpl(AccessRequirementDAO accessRequirementDao, RequestManager requestManager,
 			ResearchProjectDAO researchProjectDao, SubmissionDAO submissionDao, AccessApprovalDAO accessApprovalDao,
 			SubscriptionDAO subscriptionDao, TransactionalMessenger transactionalMessenger, AccessApprovalManager accessAprovalManager,
-			DataAccessAuthorizationManager authorizationManager) {
+			DataAccessAuthorizationManager authorizationManager, ForumDAO forumDao, DiscussionThreadDAO threadDao,
+			UploadContentToS3DAO uploadDao, IdGenerator idGenerator) {
 		this.accessRequirementDao = accessRequirementDao;
 		this.requestManager = requestManager;
 		this.researchProjectDao = researchProjectDao;
@@ -93,6 +111,10 @@ public class SubmissionManagerImpl implements SubmissionManager{
 		this.transactionalMessenger = transactionalMessenger;
 		this.accessAprovalManager = accessAprovalManager;
 		this.authorizationManager = authorizationManager;
+		this.forumDao = forumDao;
+		this.threadDao = threadDao;
+		this.uploadDao = uploadDao;
+		this.idGenerator = idGenerator;
 	}
 
 	@WriteTransaction
@@ -109,7 +131,11 @@ public class SubmissionManagerImpl implements SubmissionManager{
 
 		Submission submissionToCreate = new Submission();
 		submissionToCreate.setRequestId(request.getId());
-		submissionToCreate.setResearchProjectSnapshot(researchProjectDao.get(request.getResearchProjectId()));
+		// Only a request against a managed ACT requirement has a research project to snapshot; a
+		// schema based request collects the same information as part of its schemaData instead.
+		if (request.getResearchProjectId() != null) {
+			submissionToCreate.setResearchProjectSnapshot(researchProjectDao.get(request.getResearchProjectId()));
+		}
 		submissionToCreate.setSubjectId(createSubmissionRequest.getSubjectId());
 		submissionToCreate.setSubjectType(createSubmissionRequest.getSubjectType());
 
@@ -117,6 +143,8 @@ public class SubmissionManagerImpl implements SubmissionManager{
 		prepareCreationFields(userInfo, submissionToCreate);
 		SubmissionStatus status = submissionDao.createSubmission(submissionToCreate);
 		subscriptionDao.create(userInfo.getId().toString(), status.getSubmissionId(), SubscriptionObjectType.DATA_ACCESS_SUBMISSION_STATUS);
+
+		createThreadForSubmission(submissionToCreate.getAccessRequirementId(), status.getSubmissionId());
 
 		MessageToSend changeMessage = new MessageToSend()
 				.withUserId(userInfo.getId())
@@ -139,6 +167,16 @@ public class SubmissionManagerImpl implements SubmissionManager{
 	 * 
 	 * @param submissionId
 	 */
+	private void createThreadForSubmission(String accessRequirementId, String submissionId) {
+		Forum forum = forumDao.getForumByObjectIdAndType(accessRequirementId, ForumObjectType.ACCESS_REQUIREMENT);
+		Long threadId = idGenerator.generateNewId(IdType.DISCUSSION_THREAD_ID);
+		String title = "submissionId:" + submissionId;
+        String messageKey = UUID.randomUUID().toString();
+        long senderUserId = BOOTSTRAP_PRINCIPAL.DATA_ACCESS_NOTFICATIONS_SENDER.getPrincipalId();
+        threadDao.createThread(forum.getId(), threadId.toString(), title, messageKey, senderUserId);
+        threadDao.insertSubmissionReference(threadId.toString(), submissionId);
+    }
+
 	private void sendLocalEventAfterCommit(String submissionId) {
 		transactionalMessenger.publishMessageAfterCommit(new DataAccessSubmissionEvent().setObjectId(submissionId)
 				.setObjectType(ObjectType.DATA_ACCESS_SUBMISSION_EVENT).setTimestamp(Instant.now().toDate()));
@@ -162,26 +200,29 @@ public class SubmissionManagerImpl implements SubmissionManager{
 				"A submission has been created. It has to be reviewed or cancelled before another submission can be created.");
 
 		AccessRequirement ar = accessRequirementDao.get(request.getAccessRequirementId());
-		ValidateArgument.requirement(ar instanceof ManagedACTAccessRequirement,
-				"A Submission can only be created for an ManagedACTAccessRequirement.");
+		ValidateArgument.requirement(ar instanceof HasExpiration,
+				"A Submission can only be created for a managed access requirement.");
 		submissionToCreate.setAccessRequirementVersion(ar.getVersionNumber());
 
 		// validate based on the access requirement
-		ManagedACTAccessRequirement actAR = (ManagedACTAccessRequirement) ar;
-		if (actAR.getIsDUCRequired()) {
+		if (ar instanceof HasDataUseCertificate duc && Boolean.TRUE.equals(duc.getIsDUCRequired())) {
 			ValidateArgument.requirement(request.getDucFileHandleId()!= null,
 					"You must provide a Data Use Certification document.");
 			submissionToCreate.setDucFileHandleId(request.getDucFileHandleId());
 		}
-		if (actAR.getIsIRBApprovalRequired()) {
-			ValidateArgument.requirement(request.getIrbFileHandleId()!= null,
-					"You must provide an Institutional Review Board approval document.");
-			submissionToCreate.setIrbFileHandleId(request.getIrbFileHandleId());
-		}
-		if (actAR.getAreOtherAttachmentsRequired()) {
-			ValidateArgument.requirement(request.getAttachments()!= null && !request.getAttachments().isEmpty(),
-					"You must provide the required attachment(s).");
-			submissionToCreate.setAttachments(request.getAttachments());
+		// The IRB approval and the supplemental attachments are only asked for by the managed ACT
+		// requirement; for a schema based requirement they are described by the bound schema instead.
+		if (ar instanceof ManagedACTAccessRequirement actAR) {
+			if (actAR.getIsIRBApprovalRequired()) {
+				ValidateArgument.requirement(request.getIrbFileHandleId()!= null,
+						"You must provide an Institutional Review Board approval document.");
+				submissionToCreate.setIrbFileHandleId(request.getIrbFileHandleId());
+			}
+			if (actAR.getAreOtherAttachmentsRequired()) {
+				ValidateArgument.requirement(request.getAttachments()!= null && !request.getAttachments().isEmpty(),
+						"You must provide the required attachment(s).");
+				submissionToCreate.setAttachments(request.getAttachments());
+			}
 		}
 		ValidateArgument.requirement(request.getAccessorChanges() != null && !request.getAccessorChanges().isEmpty(),
 				"Must provide at least one accessor.");
@@ -207,7 +248,7 @@ public class SubmissionManagerImpl implements SubmissionManager{
 			}
 		}
 
-		accessAprovalManager.validateHasAccessorRequirement(actAR, accessorsWillHaveAccess);
+		accessAprovalManager.validateHasAccessorRequirement((HasAccessorRequirement) ar, accessorsWillHaveAccess);
 
 		if (!accessorsAlreadyHaveAccess.isEmpty()) {
 			ValidateArgument.requirement(accessApprovalDao.hasApprovalsSubmittedBy(
@@ -275,7 +316,7 @@ public class SubmissionManagerImpl implements SubmissionManager{
 						"Cannot change state of a submission with "+submission.getState()+" state.");
 		
 		if (request.getNewState().equals(SubmissionState.APPROVED)) {
-			ManagedACTAccessRequirement ar = (ManagedACTAccessRequirement)accessRequirementDao.get(submission.getAccessRequirementId());
+			HasExpiration ar = (HasExpiration) accessRequirementDao.get(submission.getAccessRequirementId());
 			Date expiredOn = calculateExpiredOn(ar.getExpirationPeriod());
 			
 			List<AccessApproval> approvalsToCreateOrUpdate = new ArrayList<AccessApproval>();
@@ -417,7 +458,9 @@ public class SubmissionManagerImpl implements SubmissionManager{
 			expiredOn = getLatestExpirationDate(approvals);
 		}
 
-		if (concreteType.equals(ManagedACTAccessRequirement.class.getName())) {
+		// Every access requirement that is satisfied by a reviewed submission reports the status of that
+		// submission alongside the approval state.
+		if (AccessRequirementUtils.MANAGED_REQUIREMENT_TYPES.contains(concreteType)) {
 			ManagedACTAccessRequirementStatus status = new ManagedACTAccessRequirementStatus();
 			SubmissionStatus currentSubmissionStatus = submissionDao.getStatusByRequirementIdAndPrincipalId(
 					accessRequirementId, userInfo.getId().toString());
@@ -447,6 +490,16 @@ public class SubmissionManagerImpl implements SubmissionManager{
 
 		return submission;
 	}
+
+	@Override
+	public Submission getSubmissionForThread(UserInfo user, String threadId) {
+		ValidateArgument.required(user, "user");
+		ValidateArgument.required(threadId, "threadId");
+		String submissionId = threadDao.getSubmissionIdForThread(threadId).orElseThrow(() ->
+				new NotFoundException("Submission for thread '" + threadId + "' does not exist"));
+		return getSubmission(user, submissionId);
+	}
+
 
 	@Override
 	public AccessApproval getUserAccessApproval(UserInfo userInfo, String submissionId) {

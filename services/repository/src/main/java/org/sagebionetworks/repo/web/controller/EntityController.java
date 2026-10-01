@@ -8,8 +8,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 import org.json.JSONObject;
 import org.sagebionetworks.reflection.model.PaginatedResults;
@@ -18,6 +18,7 @@ import org.sagebionetworks.repo.model.ACLInheritanceException;
 import org.sagebionetworks.repo.model.AccessControlList;
 import org.sagebionetworks.repo.model.AuthorizationConstants;
 import org.sagebionetworks.repo.model.BooleanResult;
+import org.sagebionetworks.repo.model.ChangeDataTypeRequest;
 import org.sagebionetworks.repo.model.ConflictingUpdateException;
 import org.sagebionetworks.repo.model.DataType;
 import org.sagebionetworks.repo.model.DataTypeResponse;
@@ -251,12 +252,15 @@ import org.springframework.web.bind.annotation.ResponseStatus;
  * </tr>
  * <tr>
  * <td>Maximum number of values associated with a single key in Annotations</td>
- * <td>100</td>
+ * <td>1,000</td>
  * </tr>
  * <tr>
- * <td>Maximum total character count for all values associated with a single key
- * in Annotations when the AnnotationValueType is STRING</td>
- * <td>500</td>
+ * <td>Maximum size of a single STRING value in Annotations</td>
+ * <td>1,000 characters</td>
+ * </tr>
+ * <tr>
+ * <td>Maximum total character count for all STRING values associated with a single key in Annotations</td>
+ * <td>100,000 characters</td>
  * </tr>
  * <tr>
  * <td>Maximum hierarchical depth of an Entity</td>
@@ -1656,28 +1660,51 @@ public class EntityController {
 	 * </p>
 	 * <p>
 	 * Note: The caller must be a member of the 'Synapse Access and Compliance Team'
-	 * (id=464532) in order to change an Entity's type to 'OPEN_DATA'. The caller
-	 * must be grated UPDATED on the Entity to change the its type to any other
-	 * value.
+	 * (id=464532) in order to change an Entity's type to 'OPEN_DATA' or
+	 * 'AGGREGATE_DATA'. The caller must be granted UPDATE on the Entity to change
+	 * its type to any other value.
 	 * </p>
-	 * 
+	 * <p>
+	 * The type may be provided either as the <code>type</code> query parameter or
+	 * in a <a href="${org.sagebionetworks.repo.model.ChangeDataTypeRequest}">
+	 * ChangeDataTypeRequest</a> body. The 'AGGREGATE_DATA' type must be set using a
+	 * request body because it requires a bound
+	 * <a href="${org.sagebionetworks.repo.model.AggregateDataConfiguration}">
+	 * AggregateDataConfiguration</a>.
+	 * </p>
+	 *
 	 * @param userId
 	 * @param id
-	 * @param dataType
+	 * @param dataType The DataType to assign, when using the query-parameter form.
+	 * @param request  The change request, when using the request-body form. Takes
+	 *                 precedence over the <code>type</code> query parameter.
 	 */
 	@RequiredScope({ view, modify })
 	@ResponseStatus(HttpStatus.OK)
 	@RequestMapping(value = { UrlHelpers.ENTITY_DATA_TYPE }, method = RequestMethod.PUT)
 	public @ResponseBody DataTypeResponse changeEntityDataType(
 			@RequestParam(value = AuthorizationConstants.USER_ID_PARAM) Long userId, @PathVariable String id,
-			@RequestParam(value = "type") DataType dataType) {
-		return serviceProvider.getEntityService().changeEntityDataType(userId, id, dataType);
+			@RequestParam(value = "type", required = false) DataType dataType,
+			@RequestBody(required = false) ChangeDataTypeRequest request) {
+		if (request == null) {
+			// Legacy query-parameter form. AGGREGATE_DATA is not expressible this way
+			// because it requires a configuration that only the request body can carry.
+			if (dataType == null) {
+				throw new IllegalArgumentException("Either the 'type' query parameter or a request body is required.");
+			}
+			if (DataType.AGGREGATE_DATA.equals(dataType)) {
+				throw new IllegalArgumentException(
+						"The " + DataType.AGGREGATE_DATA.name() + " DataType must be set using a request body.");
+			}
+			request = new ChangeDataTypeRequest().setDataType(dataType);
+		}
+		return serviceProvider.getEntityService().changeEntityDataType(userId, id, request);
 	}
 
 	/**
 	 * Gets the temporary S3 credentials from STS for the given entity. These
 	 * credentials are only good for the bucket and base key specified by the
-	 * returned credentials and expire 12 hours after this API is called.
+	 * returned credentials and expire 1 hour after this API is called.
 	 *
 	 * <p>
 	 * The specified entity must be a folder with an STS-enabled storage location.

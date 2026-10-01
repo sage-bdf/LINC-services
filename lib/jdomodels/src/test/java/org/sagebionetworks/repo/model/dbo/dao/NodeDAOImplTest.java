@@ -91,6 +91,7 @@ import org.sagebionetworks.repo.model.dbo.persistence.DBORevision;
 import org.sagebionetworks.repo.model.dbo.schema.DerivedAnnotationDao;
 import org.sagebionetworks.repo.model.dbo.schema.EntitySchemaValidationResultDao;
 import org.sagebionetworks.repo.model.dbo.schema.JsonSchemaTestHelper;
+import org.sagebionetworks.repo.model.dbo.search.SearchConfigurationDao;
 import org.sagebionetworks.repo.model.entity.Direction;
 import org.sagebionetworks.repo.model.entity.IdAndVersion;
 import org.sagebionetworks.repo.model.entity.NameIdType;
@@ -122,6 +123,7 @@ import org.sagebionetworks.repo.web.FileHandleLinkedException;
 import org.sagebionetworks.repo.web.NotFoundException;
 import org.sagebionetworks.schema.adapter.JSONObjectAdapterException;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.UncategorizedSQLException;
@@ -166,9 +168,14 @@ public class NodeDAOImplTest {
 	@Autowired
 	private TeamDAO teamDAO;
 	
+	@Qualifier("jdbcTemplate")
+	@Autowired
+	private JdbcTemplate repoJdbcTempalte;
+
 	@Autowired
 	private MigratableTableDAO migratableTableDao;
 		
+	@Qualifier("migrationJdbcTemplate")
 	@Autowired
 	private JdbcTemplate migrationJdbcTemplate;
 
@@ -192,6 +199,9 @@ public class NodeDAOImplTest {
 	
 	@Autowired
 	private EntitySchemaValidationResultDao schemaValidationResultDao;
+
+	@Autowired
+	private SearchConfigurationDao searchConfigurationDao;
 
 	// the datasets that must be deleted at the end of each test.
 	List<String> toDelete = new ArrayList<String>();
@@ -225,7 +235,7 @@ public class NodeDAOImplTest {
 		
 		creatorUserGroupId = BOOTSTRAP_PRINCIPAL.THE_ADMIN_USER.getPrincipalId();
 		altUserGroupId = BOOTSTRAP_PRINCIPAL.AUTHENTICATED_USERS_GROUP.getPrincipalId();
-		adminUser = new UserInfo(true, creatorUserGroupId);
+		adminUser = new UserInfo(true, creatorUserGroupId, AuthorizationConstants.DEFAULT_REALM_ID);
 		
 		assertNotNull(nodeDao);
 		toDelete = new ArrayList<String>();
@@ -291,6 +301,7 @@ public class NodeDAOImplTest {
 		for (String todelete : Lists.reverse(userGroupsToDelete)) {
 			userGroupDAO.delete(todelete);
 		}
+		searchConfigurationDao.truncateAll();
 		nodeDao.truncateAll();
 		derivedAnnotationsDao.clearAll();
 		schemaValidationResultDao.truncateAll();
@@ -4845,6 +4856,125 @@ public class NodeDAOImplTest {
 			nodeDao.getEntityIdOfFirstBoundSchema(nodeId);
 		});
 	}
+
+	@Test
+	public void testGetEntityIdOfFirstBoundSearchConfigWithDirectBinding() {
+		searchConfigurationDao.truncateAll();
+		Node project = NodeTestUtils.createNew("sc-project", creatorUserGroupId);
+		project = nodeDao.createNewNode(project);
+		Long projectId = KeyFactory.stringToKey(project.getId());
+		toDelete.add(project.getId());
+
+		searchConfigurationDao.bindSearchConfigToObject(100L, projectId, "entity", creatorUserGroupId);
+
+		// call under test
+		Optional<Long> result = nodeDao.getEntityIdOfFirstBoundSearchConfig(projectId);
+
+		assertEquals(Optional.of(projectId), result);
+	}
+
+	@Test
+	public void testGetEntityIdOfFirstBoundSearchConfigWithParentBinding() {
+		searchConfigurationDao.truncateAll();
+		Node project = NodeTestUtils.createNew("sc-parent-project", creatorUserGroupId);
+		project = nodeDao.createNewNode(project);
+		Long projectId = KeyFactory.stringToKey(project.getId());
+		toDelete.add(project.getId());
+
+		Node folder = NodeTestUtils.createNew("sc-folder", creatorUserGroupId);
+		folder.setParentId(project.getId());
+		folder = nodeDao.createNewNode(folder);
+		Long folderId = KeyFactory.stringToKey(folder.getId());
+		toDelete.add(folder.getId());
+
+		searchConfigurationDao.bindSearchConfigToObject(100L, projectId, "entity", creatorUserGroupId);
+
+		// call under test
+		Optional<Long> result = nodeDao.getEntityIdOfFirstBoundSearchConfig(folderId);
+
+		assertEquals(Optional.of(projectId), result);
+	}
+
+	@Test
+	public void testGetEntityIdOfFirstBoundSearchConfigWithGrandparentBinding() {
+		searchConfigurationDao.truncateAll();
+		Node grandparent = NodeTestUtils.createNew("sc-grandparent", creatorUserGroupId);
+		grandparent = nodeDao.createNewNode(grandparent);
+		Long grandId = KeyFactory.stringToKey(grandparent.getId());
+		toDelete.add(grandparent.getId());
+
+		Node parent = NodeTestUtils.createNew("sc-parent", creatorUserGroupId);
+		parent.setParentId(grandparent.getId());
+		parent = nodeDao.createNewNode(parent);
+		toDelete.add(parent.getId());
+
+		Node child = NodeTestUtils.createNew("sc-child", creatorUserGroupId);
+		child.setParentId(parent.getId());
+		child = nodeDao.createNewNode(child);
+		Long childId = KeyFactory.stringToKey(child.getId());
+		toDelete.add(child.getId());
+
+		searchConfigurationDao.bindSearchConfigToObject(100L, grandId, "entity", creatorUserGroupId);
+
+		// call under test
+		Optional<Long> result = nodeDao.getEntityIdOfFirstBoundSearchConfig(childId);
+
+		assertEquals(Optional.of(grandId), result);
+	}
+
+	@Test
+	public void testGetEntityIdOfFirstBoundSearchConfigWithClosestBindingWins() {
+		searchConfigurationDao.truncateAll();
+		Node project = NodeTestUtils.createNew("sc-closest-project", creatorUserGroupId);
+		project = nodeDao.createNewNode(project);
+		Long projectId = KeyFactory.stringToKey(project.getId());
+		toDelete.add(project.getId());
+
+		Node folder = NodeTestUtils.createNew("sc-closest-folder", creatorUserGroupId);
+		folder.setParentId(project.getId());
+		folder = nodeDao.createNewNode(folder);
+		Long folderId = KeyFactory.stringToKey(folder.getId());
+		toDelete.add(folder.getId());
+
+		Node child = NodeTestUtils.createNew("sc-closest-child", creatorUserGroupId);
+		child.setParentId(folder.getId());
+		child = nodeDao.createNewNode(child);
+		Long childId = KeyFactory.stringToKey(child.getId());
+		toDelete.add(child.getId());
+
+		// Bind project to configA, folder to configB
+		searchConfigurationDao.bindSearchConfigToObject(100L, projectId, "entity", creatorUserGroupId);
+		searchConfigurationDao.bindSearchConfigToObject(200L, folderId, "entity", creatorUserGroupId);
+
+		// call under test — closest (folder) should win
+		Optional<Long> result = nodeDao.getEntityIdOfFirstBoundSearchConfig(childId);
+
+		assertEquals(Optional.of(folderId), result);
+	}
+
+	@Test
+	public void testGetEntityIdOfFirstBoundSearchConfigWithNoBinding() {
+		searchConfigurationDao.truncateAll();
+		Node project = NodeTestUtils.createNew("sc-no-bind", creatorUserGroupId);
+		project = nodeDao.createNewNode(project);
+		Long projectId = KeyFactory.stringToKey(project.getId());
+		toDelete.add(project.getId());
+
+		// call under test
+		Optional<Long> result = nodeDao.getEntityIdOfFirstBoundSearchConfig(projectId);
+
+		assertEquals(Optional.empty(), result);
+	}
+
+	@Test
+	public void testGetEntityIdOfFirstBoundSearchConfigWithNullNodeId() {
+		Long nodeId = null;
+		// call under test
+		String message = assertThrows(IllegalArgumentException.class, () -> {
+			nodeDao.getEntityIdOfFirstBoundSearchConfig(nodeId);
+		}).getMessage();
+		assertEquals("nodeId is required.", message);
+	}
 	
 	@Test
 	public void testUpdateRevisionFileHandle() {
@@ -5917,5 +6047,13 @@ public class NodeDAOImplTest {
 		assertNotNull(result.getPath());
 		assertEquals(827, result.getPath().length());
 	}
-
+	
+	/**
+	 * Ensure the datasource used by the IdGenerator is not the same as the main repository datasource.
+	 * This is a test added for PLFM-9736.
+	 */
+	@Test
+	public void testIdGeneratorDataSourcesDoesNotMatchRepoDataSource() {
+		assertNotEquals(repoJdbcTempalte.getDataSource().toString(), idGenerator.getDataSourceString());
+	}
 }

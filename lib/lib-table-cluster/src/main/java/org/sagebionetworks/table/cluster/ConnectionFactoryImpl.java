@@ -4,23 +4,26 @@ import java.sql.SQLException;
 import java.util.Collections;
 import java.util.List;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import javax.sql.DataSource;
 
 import org.apache.commons.dbcp2.BasicDataSource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.sagebionetworks.StackConfiguration;
 import org.sagebionetworks.lib.dbuserhelper.DBUserHelper;
 import org.sagebionetworks.repo.model.entity.IdAndVersion;
+import org.sagebionetworks.table.cluster.search.SearchIndexStatusDao;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 /**
  * Note: For the first pass at this feature we are only using one database. This
  * will be extended in the future.
- * 
+ *
  * @author jmhill
  *
  */
@@ -36,20 +39,25 @@ public class ConnectionFactoryImpl implements ConnectionFactory {
 	 */
 	private BasicDataSource singleConnectionPool;
 
-	private DBUserHelper dbUserHelper;
-
 	/**
 	 * Note: The DAO is autowired so it can be profiled. See: PLFM-5984. We might
 	 * need an alternate solution to support multiple database connections in the
 	 * future.
 	 */
 	private TableIndexDAO tableIndexDao;
-	
+
+	private SearchIndexStatusDao searchIndexStatusDao;
+
+	private StackConfiguration stackConfiguration;
+
 	@Autowired
-	public ConnectionFactoryImpl(BasicDataSource tableDatabaseConnectionPool, TableIndexDAO tableIndexDao, DBUserHelper dbuh) {
+	public ConnectionFactoryImpl(@Qualifier("tableDatabaseConnectionPool") BasicDataSource tableDatabaseConnectionPool,
+			TableIndexDAO tableIndexDao, SearchIndexStatusDao searchIndexStatusDao,
+			StackConfiguration stackConfiguration) {
 		this.singleConnectionPool = tableDatabaseConnectionPool;
 		this.tableIndexDao = tableIndexDao;
-		this.dbUserHelper = dbuh;
+		this.searchIndexStatusDao = searchIndexStatusDao;
+		this.stackConfiguration = stackConfiguration;
 	}
 
 	@Override
@@ -66,18 +74,20 @@ public class ConnectionFactoryImpl implements ConnectionFactory {
 		// ensure the index has the correct tables
 		tableIndexDao.setDataSource(singleConnectionPool);
 		tableIndexDao.createObjectReplicationTablesIfDoesNotExist();
+		searchIndexStatusDao.setDataSource(singleConnectionPool);
+		searchIndexStatusDao.createTableIfDoesNotExist();
 		createDBUser();
 	}
 
 	private void createDBUser() {
 		JdbcTemplate template = new JdbcTemplate(singleConnectionPool);
-		dbUserHelper.createDbReadOnlyUser(template);
+		DBUserHelper.createDbReadOnlyUser(template, stackConfiguration);
 	}
 
 	/**
 	 * Spring will calls this method when this bean is destroyed. This is our chance
 	 * to shutdown the database connection pools.
-	 * 
+	 *
 	 * @throws SQLException
 	 */
 	@PreDestroy
@@ -101,6 +111,11 @@ public class ConnectionFactoryImpl implements ConnectionFactory {
 	@Override
 	public DataSource getFirstDataSource() {
 		return singleConnectionPool;
+	}
+
+	@Override
+	public SearchIndexStatusDao getSearchIndexStatusDao() {
+		return searchIndexStatusDao;
 	}
 
 }

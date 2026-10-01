@@ -5,7 +5,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.ArgumentMatchers.anyCollectionOf;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -20,7 +20,6 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.sagebionetworks.markdown.MarkdownClientException;
 import org.sagebionetworks.markdown.MarkdownDao;
@@ -30,7 +29,7 @@ import org.sagebionetworks.repo.model.dao.subscription.Subscriber;
 import org.sagebionetworks.repo.model.subscription.SubscriptionObjectType;
 import org.sagebionetworks.repo.model.subscription.Topic;
 
-import com.amazonaws.services.simpleemail.model.SendRawEmailRequest;
+import software.amazon.awssdk.services.ses.model.SendRawEmailRequest;
 import com.google.common.collect.Sets;
 
 @RunWith(MockitoJUnitRunner.class)
@@ -127,6 +126,55 @@ public class DiscussionBroadcastMessageBuilderTest {
 	}
 
 	@Test
+	public void testBuildARReplyRawBodyForSubscriber() {
+		String arId = "456";
+		String arName = "AccessRequirement 456";
+		topic.setObjectType(SubscriptionObjectType.THREAD);
+		builder = new DiscussionBroadcastMessageBuilder(actorUsername, actorUserId,
+				threadTitle, threadId, arId, arName, markdown,
+				ReplyMessageBuilderFactory.REPLY_AR_TEMPLATE, ReplyMessageBuilderFactory.REPLY_CREATED_TITLE,
+				ReplyMessageBuilderFactory.UNSUBSCRIBE_THREAD, mockMarkdownDao, topic, mockUserManager);
+
+		//call under test
+		String body = builder.buildRawBodyForSubscriber(subscriber);
+		assertNotNull(body);
+		assertTrue(body.contains("someone"));
+		assertTrue(body.contains(threadTitle));
+		assertTrue(body.contains(arName));
+		// AR links
+		assertTrue(body.contains("https://www.synapse.org/AccessRequirement:AR_ID=456&threadId=333"));
+		assertTrue(body.contains("https://www.synapse.org/AccessRequirement:AR_ID=456"));
+		// Should NOT contain project-style links
+		assertFalse(body.contains("Synapse:syn"));
+		assertFalse(body.contains("Subscribe to the thread"));
+		assertTrue(body.contains("Unsubscribe from the thread"));
+	}
+
+	@Test
+	public void testBuildARReplyRawBodyForNonSubscriber() {
+		String arId = "456";
+		String arName = "AccessRequirement 456";
+		topic.setObjectType(SubscriptionObjectType.THREAD);
+		builder = new DiscussionBroadcastMessageBuilder(actorUsername, actorUserId,
+				threadTitle, threadId, arId, arName, markdown,
+				ReplyMessageBuilderFactory.REPLY_AR_TEMPLATE, ReplyMessageBuilderFactory.REPLY_CREATED_TITLE,
+				ReplyMessageBuilderFactory.UNSUBSCRIBE_THREAD, mockMarkdownDao, topic, mockUserManager);
+
+		//call under test
+		String body = builder.buildRawBodyForNonSubscriber(user);
+		assertNotNull(body);
+		assertTrue(body.contains("someone"));
+		assertTrue(body.contains(threadTitle));
+		assertTrue(body.contains(arName));
+		// AR links
+		assertTrue(body.contains("https://www.synapse.org/AccessRequirement:AR_ID=456&threadId=333"));
+		assertTrue(body.contains("https://www.synapse.org/AccessRequirement:AR_ID=456"));
+		// Should NOT contain project-style links
+		assertFalse(body.contains("Synapse:syn"));
+		assertTrue(body.contains("Subscribe to the thread"));
+	}
+
+	@Test
 	public void testBuildRawBodyForNoneSubscriber(){
 		String body = builder.buildRawBodyForNonSubscriber(user);
 		assertNotNull(body);
@@ -208,7 +256,7 @@ public class DiscussionBroadcastMessageBuilderTest {
 		for(int i=0; i<count; i++){
 			set.add(""+i);
 		}
-		when(mockUserManager.getDistinctUserIdsForAliases(anyCollectionOf(String.class), anyLong(), anyLong())).thenReturn(set);
+		when(mockUserManager.getDistinctUserIdsForAliases(any(), anyLong(), anyLong())).thenReturn(set);
 		// call under test
 		Set<String> results = builder.getRelatedUsers();
 		assertEquals(set, results);
@@ -221,7 +269,7 @@ public class DiscussionBroadcastMessageBuilderTest {
 		for(int i=0; i<count; i++){
 			set.add(""+i);
 		}
-		when(mockUserManager.getDistinctUserIdsForAliases(anyCollectionOf(String.class), anyLong(), anyLong())).thenReturn(set);
+		when(mockUserManager.getDistinctUserIdsForAliases(any(), anyLong(), anyLong())).thenReturn(set);
 		// call under test
 		try {
 			builder.getRelatedUsers();
@@ -231,7 +279,7 @@ public class DiscussionBroadcastMessageBuilderTest {
 			assertTrue(e.getMessage().contains(""+DiscussionBroadcastMessageBuilder.MAX_USER_IDS_PER_MESSAGE));
 		}
 		// validate paging
-		verify(mockUserManager).getDistinctUserIdsForAliases(anyCollectionOf(String.class), eq(DiscussionBroadcastMessageBuilder.MAX_USER_IDS_PER_MESSAGE+1), eq(0L));
+		verify(mockUserManager).getDistinctUserIdsForAliases(any(), eq(DiscussionBroadcastMessageBuilder.MAX_USER_IDS_PER_MESSAGE+1), eq(0L));
 	}
 
 	@Test
@@ -241,7 +289,7 @@ public class DiscussionBroadcastMessageBuilderTest {
 		Set<String> userIdSet = new HashSet<String>();
 		userIdSet.add("101");
 		Set<String> idSet = Sets.newHashSet("101");
-		when(mockUserManager.getDistinctUserIdsForAliases(anyCollectionOf(String.class), anyLong(), anyLong())).thenReturn(idSet);
+		when(mockUserManager.getDistinctUserIdsForAliases(any(), anyLong(), anyLong())).thenReturn(idSet);
 		builder = new DiscussionBroadcastMessageBuilder(actorUsername, actorUserId,
 				threadTitle, threadId, projectId, projectName, "@user",
 				ThreadMessageBuilderFactory.THREAD_TEMPLATE, ThreadMessageBuilderFactory.THREAD_CREATED_TITLE,

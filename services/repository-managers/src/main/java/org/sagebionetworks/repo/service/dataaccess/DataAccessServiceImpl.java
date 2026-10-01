@@ -11,6 +11,8 @@ import org.sagebionetworks.repo.model.RestrictionInformationBatchResponse;
 import org.sagebionetworks.repo.model.RestrictionInformationRequest;
 import org.sagebionetworks.repo.model.RestrictionInformationResponse;
 import org.sagebionetworks.repo.model.UserInfo;
+import org.sagebionetworks.repo.model.dataaccess.AccessRequestList;
+import org.sagebionetworks.repo.model.dataaccess.AccessRequestListRequest;
 import org.sagebionetworks.repo.model.dataaccess.AccessRequirementStatus;
 import org.sagebionetworks.repo.model.dataaccess.CreateSubmissionRequest;
 import org.sagebionetworks.repo.model.dataaccess.OpenSubmissionPage;
@@ -143,6 +145,12 @@ public class DataAccessServiceImpl implements DataAccessService {
 	}
 
 	@Override
+	public Submission getSubmissionForThread(Long userId, String threadId) {
+		UserInfo user = userManager.getUserInfo(userId);
+		return dataAccessSubmissionManager.getSubmissionForThread(user, threadId);
+	}
+
+	@Override
 	public AccessApproval getUserAccessApproval(Long userId, String submissionId) {
 		UserInfo user = userManager.getUserInfo(userId);
 		return dataAccessSubmissionManager.getUserAccessApproval(user, submissionId);
@@ -152,6 +160,12 @@ public class DataAccessServiceImpl implements DataAccessService {
 	public UserSubmissionSearchResponse searchUserSubmissions(Long userId, UserSubmissionSearchRequest request) {
 		UserInfo user = userManager.getUserInfo(userId);
 		return dataAccessSubmissionManager.searchUserSubmissions(user, request);
+	}
+
+	@Override
+	public AccessRequestList listUserRequests(Long userId, AccessRequestListRequest request) {
+		UserInfo user = userManager.getUserInfo(userId);
+		return dataAccessRequestManager.listUserRequests(user, request);
 	}
 
 }

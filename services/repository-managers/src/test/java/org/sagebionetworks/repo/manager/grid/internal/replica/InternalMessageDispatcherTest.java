@@ -3,7 +3,7 @@ package org.sagebionetworks.repo.manager.grid.internal.replica;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyZeroInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
@@ -69,12 +69,30 @@ public class InternalMessageDispatcherTest {
 	}
 
 	@Test
+	public void testDispatchMessageWithReplicaConnected() {
+		message = new JsonRxMessage("[8,\"replica-connected\"]");
+		bundle = new JsonRxMessageBundle(message, connection, mockCallback);
+		// call under test
+		dispatcher.dispatchMessage(bundle);
+		verify(mockGridReplicaManager).onConnected(mockCallback, connection);
+	}
+
+	@Test
 	public void testDispatchWithNewPatch() {
 		message = new JsonRxMessage("[8,\"new-patch\"]");
 		bundle = new JsonRxMessageBundle(message, connection, mockCallback);
 		// call under test
 		dispatcher.dispatchMessage(bundle);
 		verify(mockGridReplicaManager).onNewPatch(mockCallback, connection);
+	}
+
+	@Test
+	public void testDispatchWithNewSnapshot() {
+		message = new JsonRxMessage("[8,\"new-snapshot\"]");
+		bundle = new JsonRxMessageBundle(message, connection, mockCallback);
+		// call under test
+		dispatcher.dispatchMessage(bundle);
+		verify(mockGridReplicaManager).onExportSnapshot(mockCallback, connection);
 	}
 
 	@Test
@@ -86,7 +104,7 @@ public class InternalMessageDispatcherTest {
 			dispatcher.dispatchMessage(bundle);
 		}).getMessage();
 		assertEquals("Cannot handle: '[8,\"other\"]'", message);
-		verifyZeroInteractions(mockGridReplicaManager);
+		verifyNoMoreInteractions(mockGridReplicaManager);
 	}
 
 	@Test
@@ -98,7 +116,7 @@ public class InternalMessageDispatcherTest {
 			dispatcher.dispatchMessage(bundle);
 		}).getMessage();
 		assertEquals("Cannot handle: '[7,\"other\"]'", message);
-		verifyZeroInteractions(mockGridReplicaManager);
+		verifyNoMoreInteractions(mockGridReplicaManager);
 	}
 
 	@Test
@@ -136,7 +154,7 @@ public class InternalMessageDispatcherTest {
 			dispatcher.dispatchMessage(bundle);
 		}).getMessage();
 		assertEquals("ResponseData must have an ID.", message);
-		verifyZeroInteractions(mockGridReplicaManager);
+		verifyNoMoreInteractions(mockGridReplicaManager);
 	}
 
 	@Test
@@ -156,7 +174,7 @@ public class InternalMessageDispatcherTest {
 			dispatcher.dispatchMessage(bundle);
 		}).getMessage();
 		assertEquals("Cannot handle: '[4,99,[[[111,1]]]]'", message);
-		verifyZeroInteractions(mockGridReplicaManager);
+		verifyNoMoreInteractions(mockGridReplicaManager);
 	}
 
 	@Test
@@ -175,7 +193,7 @@ public class InternalMessageDispatcherTest {
 			dispatcher.dispatchMessage(bundle);
 		}).getMessage();
 		assertEquals("No message chain found for session: session123, replica: 111, id: 99", message);
-		verifyZeroInteractions(mockGridReplicaManager);
+		verifyNoMoreInteractions(mockGridReplicaManager);
 	}
 
 	@Test

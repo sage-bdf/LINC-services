@@ -1,10 +1,17 @@
 package org.sagebionetworks.repo.manager.grid;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.verifyZeroInteractions;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
@@ -19,15 +26,18 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.sagebionetworks.repo.manager.UserInfoTestHelper;
 import org.sagebionetworks.repo.manager.entity.EntityAuthorizationManager;
+import org.sagebionetworks.repo.manager.entity.decider.UsersEntityAccessInfo;
 import org.sagebionetworks.repo.model.ACCESS_TYPE;
 import org.sagebionetworks.repo.model.AuthorizationConstants;
 import org.sagebionetworks.repo.model.EntityType;
 import org.sagebionetworks.repo.model.UnauthorizedException;
+import org.sagebionetworks.repo.model.UserGroupDAO;
 import org.sagebionetworks.repo.model.UserInfo;
 import org.sagebionetworks.repo.model.AuthorizationConstants.BOOTSTRAP_PRINCIPAL;
 import org.sagebionetworks.repo.model.auth.AuthorizationStatus;
 import org.sagebionetworks.repo.model.dbo.grid.GridDao;
 import org.sagebionetworks.repo.model.dbo.grid.GridSource;
+import org.sagebionetworks.repo.model.grid.AuthorizationMode;
 import org.sagebionetworks.repo.web.NotFoundException;
 
 @ExtendWith(MockitoExtension.class)
@@ -37,12 +47,18 @@ public class GridAuthorizationManagerTest {
 	private GridDao mockGridDao;
 	@Mock
 	private EntityAuthorizationManager mockEntityAuthorizationManager;
+	@Mock
+	private UserGroupDAO mockUserGroupDAO;
 
 	@InjectMocks
 	private GridAuthorizationManagerImpl manager;
 
 	@Mock
 	private UserInfo mockUser;
+	@Mock
+	private UsersEntityAccessInfo mockAccessInfo1;
+	@Mock
+	private UsersEntityAccessInfo mockAccessInfo2;
 
 	private String gridSessionId;
 	private Long userId;
@@ -101,7 +117,7 @@ public class GridAuthorizationManagerTest {
 
 		assertEquals("Unsupported grid source type: " + type.name(), message);
 
-		verifyZeroInteractions(mockEntityAuthorizationManager);
+		verifyNoMoreInteractions(mockEntityAuthorizationManager);
 	}
 
 	@Test
@@ -114,7 +130,7 @@ public class GridAuthorizationManagerTest {
 		AuthorizationStatus status = manager.hasGridSessionAccess(mockUser, gridSessionId);
 		assertEquals(AuthorizationStatus.authorized(), status);
 
-		verifyZeroInteractions(mockEntityAuthorizationManager);
+		verifyNoMoreInteractions(mockEntityAuthorizationManager);
 	}
 
 	@Test
@@ -128,7 +144,7 @@ public class GridAuthorizationManagerTest {
 
 		assertEquals("Grid session not found: " + gridSessionId, message);
 
-		verifyZeroInteractions(mockEntityAuthorizationManager);
+		verifyNoMoreInteractions(mockEntityAuthorizationManager);
 	}
 
 	@Test
@@ -145,7 +161,7 @@ public class GridAuthorizationManagerTest {
 
 		assertEquals("You are not authorized to access this resource.", message);
 
-		verifyZeroInteractions(mockEntityAuthorizationManager);
+		verifyNoMoreInteractions(mockEntityAuthorizationManager);
 	}
 
 	@Test
@@ -165,6 +181,7 @@ public class GridAuthorizationManagerTest {
 		Long ownerGroup = 444L;
 		when(mockUser.getId()).thenReturn(userId);
 		when(mockUser.getGroups()).thenReturn(Set.of(userId, ownerGroup));
+		when(mockUserGroupDAO.doesIdExist(ownerGroup)).thenReturn(true);
 
 		// call under test
 		Long result = manager.validateGridOwner(mockUser, ownerGroup.toString());
@@ -176,6 +193,7 @@ public class GridAuthorizationManagerTest {
 		Long ownerGroup = 444L;
 		when(mockUser.getId()).thenReturn(userId);
 		when(mockUser.getGroups()).thenReturn(Set.of(userId, 333L));
+		when(mockUserGroupDAO.doesIdExist(ownerGroup)).thenReturn(true);
 
 		String message = assertThrows(UnauthorizedException.class, () -> {
 			// call under test
@@ -188,6 +206,7 @@ public class GridAuthorizationManagerTest {
 	@Test
 	public void testValidateGridOwnerWithUserOwner() {
 		when(mockUser.getId()).thenReturn(userId);
+		when(mockUserGroupDAO.doesIdExist(userId)).thenReturn(true);
 
 		// call under test
 		Long result = manager.validateGridOwner(mockUser, userId.toString());
@@ -201,6 +220,7 @@ public class GridAuthorizationManagerTest {
 		// call under test
 		Long result = manager.validateGridOwner(mockUser, null);
 		assertEquals(userId, result);
+		verifyNoMoreInteractions(mockUserGroupDAO);
 	}
 
 	@Test
@@ -264,8 +284,8 @@ public class GridAuthorizationManagerTest {
 		// call under test
 		UserInfo user = manager.getRowLevelFilterUserInfo(mockUser, gridSessionId);
 		UserInfo expected = UserInfoTestHelper.createUserInfo(false, groupOwnerId);
-		expected.setGroups(Set.of(groupOwnerId, BOOTSTRAP_PRINCIPAL.AUTHENTICATED_USERS_GROUP.getPrincipalId(),
-				BOOTSTRAP_PRINCIPAL.PUBLIC_GROUP.getPrincipalId()));
+		expected.getGroups().add(BOOTSTRAP_PRINCIPAL.AUTHENTICATED_USERS_GROUP.getPrincipalId());
+		expected.getGroups().add(BOOTSTRAP_PRINCIPAL.PUBLIC_GROUP.getPrincipalId());
 		assertEquals(expected, user);
 	}
 
@@ -305,6 +325,150 @@ public class GridAuthorizationManagerTest {
 			manager.getRowLevelFilterUserInfo(mockUser, gridSessionId);
 		}).getMessage();
 		assertEquals("Grid does not have a source", message);	
+	}
+	
+	@Test
+	public void testValidateGridOwnerWithNonExistentOwner() {
+		when(mockUserGroupDAO.doesIdExist(0L)).thenReturn(false);
+
+		// call under test
+		IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+				() -> manager.validateGridOwner(mockUser, "0"));
+
+		assertEquals("ownerPrincipalId '0' does not exist.", e.getMessage());
+		verify(mockUserGroupDAO).doesIdExist(0L);
+		verifyNoMoreInteractions(mockUserGroupDAO);
+	}
+
+	@Test
+	public void testValidateGridOwnerWithNonExistentOwnerAsAdmin() {
+		UserInfo admin = new UserInfo(true, 333L, AuthorizationConstants.DEFAULT_REALM_ID);
+		when(mockUserGroupDAO.doesIdExist(0L)).thenReturn(false);
+
+		// call under test
+		IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+				() -> manager.validateGridOwner(admin, "0"));
+
+		assertEquals("ownerPrincipalId '0' does not exist.", e.getMessage());
+		verify(mockUserGroupDAO).doesIdExist(0L);
+		verifyNoMoreInteractions(mockUserGroupDAO);
+	}
+
+	@Test
+	public void testValidateGridOwnerWithValidOwnerAsMember() {
+		Long teamId = 444L;
+		when(mockUser.getId()).thenReturn(userId);
+		when(mockUser.getGroups()).thenReturn(Set.of(userId, teamId));
+		when(mockUserGroupDAO.doesIdExist(teamId)).thenReturn(true);
+
+		// call under test
+		Long result = manager.validateGridOwner(mockUser, teamId.toString());
+
+		assertEquals(teamId, result);
+	}
+
+	@Test
+	public void testValidateGridOwnerWithValidOwnerAsAdmin() {
+		UserInfo admin = new UserInfo(true, 333L, AuthorizationConstants.DEFAULT_REALM_ID);
+		Long teamId = 999L;
+		when(mockUserGroupDAO.doesIdExist(teamId)).thenReturn(true);
+
+		// call under test
+		Long result = manager.validateGridOwner(admin, teamId.toString());
+
+		assertEquals(teamId, result);
+	}
+
+	@Test
+	public void testValidateGridOwnerWithUnauthorizedUser() {
+		Long teamId = 999L;
+		when(mockUser.getId()).thenReturn(userId);
+		when(mockUser.getGroups()).thenReturn(Set.of(userId, 333L));
+		when(mockUserGroupDAO.doesIdExist(teamId)).thenReturn(true);
+
+		// call under test
+		assertThrows(UnauthorizedException.class, () -> manager.validateGridOwner(mockUser, teamId.toString()));
+	}
+
+	@Test
+	public void testValidateGridOwnerWithInvalidFormat() {
+		// call under test
+		assertThrows(IllegalArgumentException.class, () -> manager.validateGridOwner(mockUser, "not-a-number"));
+
+		verifyNoMoreInteractions(mockUserGroupDAO);
+	}
+
+	@Test
+	public void testHasGridSessionAccessWithSourceBenefactorModeWithEmptyBenefactors() {
+		when(mockGridDao.getAuthorizationMode(gridSessionId)).thenReturn(Optional.of(AuthorizationMode.SOURCE_BENEFACTOR));
+		when(mockGridDao.getSessionBenefactorIds(gridSessionId)).thenReturn(Collections.emptySet());
+		// call under test
+		AuthorizationStatus result = manager.hasGridSessionAccess(mockUser, gridSessionId);
+		assertEquals(AuthorizationStatus.authorized(), result);
+		verifyNoMoreInteractions(mockEntityAuthorizationManager);
+	}
+
+	@Test
+	public void testHasGridSessionAccessWithSourceBenefactorModeAuthorized() {
+		Set<Long> benefactorIds = Set.of(111L, 222L);
+		gridSource = new GridSource(entityId, EntityType.entityview);
+		when(mockGridDao.getAuthorizationMode(gridSessionId)).thenReturn(Optional.of(AuthorizationMode.SOURCE_BENEFACTOR));
+		when(mockGridDao.getSessionBenefactorIds(gridSessionId)).thenReturn(benefactorIds);
+		when(mockAccessInfo1.getEntityId()).thenReturn(111L);
+		when(mockAccessInfo1.getAuthorizationStatus()).thenReturn(AuthorizationStatus.authorized());
+		when(mockAccessInfo2.getEntityId()).thenReturn(222L);
+		when(mockAccessInfo2.getAuthorizationStatus()).thenReturn(AuthorizationStatus.authorized());
+		when(mockEntityAuthorizationManager.batchHasAccess(eq(mockUser), any(), eq(ACCESS_TYPE.UPDATE)))
+				.thenReturn(List.of(mockAccessInfo1, mockAccessInfo2));
+		when(mockGridDao.getSessionSource(gridSessionId)).thenReturn(Optional.of(gridSource));
+		when(mockEntityAuthorizationManager.hasAccess(mockUser, entityId.toString(), ACCESS_TYPE.READ))
+				.thenReturn(AuthorizationStatus.authorized());
+		// call under test
+		AuthorizationStatus result = manager.hasGridSessionAccess(mockUser, gridSessionId);
+		assertEquals(AuthorizationStatus.authorized(), result);
+	}
+
+	@Test
+	public void testHasGridSessionAccessWithSourceBenefactorModeSourceReadDenied() {
+		Set<Long> benefactorIds = Set.of(111L);
+		gridSource = new GridSource(entityId, EntityType.entityview);
+		when(mockGridDao.getAuthorizationMode(gridSessionId)).thenReturn(Optional.of(AuthorizationMode.SOURCE_BENEFACTOR));
+		when(mockGridDao.getSessionBenefactorIds(gridSessionId)).thenReturn(benefactorIds);
+		when(mockAccessInfo1.getEntityId()).thenReturn(111L);
+		when(mockAccessInfo1.getAuthorizationStatus()).thenReturn(AuthorizationStatus.authorized());
+		when(mockEntityAuthorizationManager.batchHasAccess(eq(mockUser), any(), eq(ACCESS_TYPE.UPDATE)))
+				.thenReturn(List.of(mockAccessInfo1));
+		when(mockGridDao.getSessionSource(gridSessionId)).thenReturn(Optional.of(gridSource));
+		when(mockEntityAuthorizationManager.hasAccess(mockUser, entityId.toString(), ACCESS_TYPE.READ))
+				.thenReturn(AuthorizationStatus.accessDenied("no read access"));
+		// call under test — all benefactors authorized but source READ denied
+		AuthorizationStatus result = manager.hasGridSessionAccess(mockUser, gridSessionId);
+		assertFalse(result.isAuthorized());
+	}
+
+	@Test
+	public void testHasGridSessionAccessWithSourceBenefactorModeAccessDenied() {
+		Set<Long> benefactorIds = Set.of(111L, 222L);
+		when(mockGridDao.getAuthorizationMode(gridSessionId)).thenReturn(Optional.of(AuthorizationMode.SOURCE_BENEFACTOR));
+		when(mockGridDao.getSessionBenefactorIds(gridSessionId)).thenReturn(benefactorIds);
+		when(mockAccessInfo1.getEntityId()).thenReturn(111L);
+		when(mockAccessInfo1.getAuthorizationStatus()).thenReturn(AuthorizationStatus.authorized());
+		// mockAccessInfo2 is not authorized — getEntityId() is not called for denied entries
+		when(mockAccessInfo2.getAuthorizationStatus()).thenReturn(AuthorizationStatus.accessDenied("no access"));
+		when(mockEntityAuthorizationManager.batchHasAccess(eq(mockUser), any(), eq(ACCESS_TYPE.UPDATE)))
+				.thenReturn(List.of(mockAccessInfo1, mockAccessInfo2));
+		// call under test
+		AuthorizationStatus result = manager.hasGridSessionAccess(mockUser, gridSessionId);
+		assertFalse(result.isAuthorized());
+	}
+
+	@Test
+	public void testGetRowLevelFilterUserInfoWithSourceBenefactorMode() {
+		when(mockGridDao.getAuthorizationMode(gridSessionId)).thenReturn(Optional.of(AuthorizationMode.SOURCE_BENEFACTOR));
+		// call under test
+		UserInfo result = manager.getRowLevelFilterUserInfo(mockUser, gridSessionId);
+		assertEquals(mockUser, result);
+		verifyNoMoreInteractions(mockEntityAuthorizationManager);
 	}
 
 }

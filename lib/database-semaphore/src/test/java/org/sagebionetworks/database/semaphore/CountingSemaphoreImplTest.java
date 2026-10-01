@@ -37,7 +37,7 @@ import org.springframework.transaction.support.DefaultTransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @ExtendWith(SpringExtension.class)
-@ContextConfiguration(locations = { "classpath:test-context.spb.xml" })
+@ContextConfiguration(classes = { SemaphoreConfig.class })
 public class CountingSemaphoreImplTest {
 
 	private static final Logger log = LogManager.getLogger(CountingSemaphoreImplTest.class);
@@ -456,6 +456,14 @@ public class CountingSemaphoreImplTest {
 				Long.class));
 		assertNotEquals(expireOn, jdbcTemplate
 				.queryForObject("SELECT EXPIRES_ON FROM SEMAPHORE_LOCK WHERE LOCK_KEY = 'key'", Timestamp.class));
+	}
+
+	@Test
+	public void testGetLockKeyAutoIncrement() {
+		semaphore.attemptToAcquireLock(key, 60, 1, context);
+		// call under test
+		long autoIncrement = semaphore.getLockKeyAutoIncrement();
+		assertTrue(autoIncrement > 0);
 	}
 
 	@Test

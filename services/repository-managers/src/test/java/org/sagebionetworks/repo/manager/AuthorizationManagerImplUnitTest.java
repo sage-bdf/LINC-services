@@ -33,7 +33,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
-import org.mockito.Mockito;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -45,20 +44,16 @@ import org.sagebionetworks.repo.manager.entity.EntityAuthorizationManager;
 import org.sagebionetworks.repo.manager.evaluation.EvaluationPermissionsManager;
 import org.sagebionetworks.repo.manager.file.FileHandleAssociationAuthorizationStatus;
 import org.sagebionetworks.repo.manager.file.FileHandleAssociationManager;
-import org.sagebionetworks.repo.manager.file.FileHandleAuthorizationManager;
 import org.sagebionetworks.repo.manager.file.FileHandleAuthorizationStatus;
-import org.sagebionetworks.repo.manager.token.TokenGenerator;
 import org.sagebionetworks.repo.manager.trash.EntityInTrashCanException;
 import org.sagebionetworks.repo.model.ACCESS_TYPE;
 import org.sagebionetworks.repo.model.AccessRequirement;
 import org.sagebionetworks.repo.model.AccessRequirementDAO;
-import org.sagebionetworks.repo.model.ActivityDAO;
 import org.sagebionetworks.repo.model.AuthorizationConstants.BOOTSTRAP_PRINCIPAL;
 import org.sagebionetworks.repo.model.DatastoreException;
 import org.sagebionetworks.repo.model.DockerNodeDao;
 import org.sagebionetworks.repo.model.EntityHeader;
 import org.sagebionetworks.repo.model.EntityType;
-import org.sagebionetworks.repo.model.GroupMembersDAO;
 import org.sagebionetworks.repo.model.HasAccessorRequirement;
 import org.sagebionetworks.repo.model.NodeDAO;
 import org.sagebionetworks.repo.model.ObjectType;
@@ -71,18 +66,13 @@ import org.sagebionetworks.repo.model.UnauthorizedException;
 import org.sagebionetworks.repo.model.UserInfo;
 import org.sagebionetworks.repo.model.auth.AuthorizationStatus;
 import org.sagebionetworks.repo.model.dao.WikiPageKey;
-import org.sagebionetworks.repo.model.dbo.dao.discussion.DiscussionThreadDAO;
-import org.sagebionetworks.repo.model.dbo.dao.discussion.ForumDAO;
 import org.sagebionetworks.repo.model.dbo.file.FileHandleDao;
 import org.sagebionetworks.repo.model.dbo.verification.VerificationDAO;
-import org.sagebionetworks.repo.model.discussion.DiscussionFilter;
-import org.sagebionetworks.repo.model.discussion.DiscussionThreadBundle;
-import org.sagebionetworks.repo.model.discussion.Forum;
 import org.sagebionetworks.repo.model.file.FileHandleAssociateType;
 import org.sagebionetworks.repo.model.file.FileHandleAssociation;
 import org.sagebionetworks.repo.model.jdo.KeyFactory;
 import org.sagebionetworks.repo.model.oauth.OAuthScope;
-import org.sagebionetworks.repo.model.subscription.SubscriptionObjectType;
+
 import org.sagebionetworks.repo.model.v2.dao.V2WikiPageDao;
 import org.sagebionetworks.repo.web.NotFoundException;
 
@@ -98,11 +88,7 @@ public class AuthorizationManagerImplUnitTest {
 	@Mock
 	private AccessRequirementDAO  mockAccessRequirementDAO;
 	@Mock
-	private ActivityDAO mockActivityDAO;
-	@Mock
 	private FileHandleDao mockFileHandleDao;
-	@Mock
-	private FileHandleAuthorizationManager fileHandleAuthorizationManager;
 	@Mock
 	private EntityAuthorizationManager mockEntityAuthorizationManager;
 	@Mock
@@ -113,10 +99,6 @@ public class AuthorizationManagerImplUnitTest {
 	private VerificationDAO mockVerificationDao;
 	@Mock
 	private NodeDAO mockNodeDao;
-	@Mock
-	private DiscussionThreadDAO mockThreadDao;
-	@Mock
-	private ForumDAO mockForumDao;
 	@Mock
 	private V2WikiPageDao mockWikiPageDaoV2;
 	@Mock
@@ -131,12 +113,6 @@ public class AuthorizationManagerImplUnitTest {
 	private org.sagebionetworks.repo.model.dbo.dao.dataaccess.SubmissionDAO mockDataAccessSubmissionDao;
 	@Mock
 	private UserInfo mockACTUser;
-	@Mock
-	private GroupMembersDAO mockGroupMembersDao;
-	@Mock
-	private Set<String> accessors;
-	@Mock
-	private TokenGenerator mockTokenGenerator;
 	@Mock
 	private DataAccessAuthorizationManager mockDataAccessAuthManager;
 	
@@ -180,11 +156,7 @@ public class AuthorizationManagerImplUnitTest {
 	private UserInfo anonymousUserInfo;
 	private UserInfo adminUser;
 	private Evaluation evaluation;
-	private String threadId;
-	private String forumId;
 	private String projectId;
-	private DiscussionThreadBundle bundle;
-	private Forum forum;
 	private String submissionId;
 
 	HasAccessorRequirement req;
@@ -212,17 +184,7 @@ public class AuthorizationManagerImplUnitTest {
 		when(mockFileHandleAssociationManager.getAuthorizationObjectTypeForAssociatedObjectType(FileHandleAssociateType.TableEntity)).thenReturn(ObjectType.ENTITY);
 		when(mockFileHandleAssociationManager.getAuthorizationObjectTypeForAssociatedObjectType(FileHandleAssociateType.WikiAttachment)).thenReturn(ObjectType.WIKI);
 
-		threadId = "0";
-		forumId = "1";
 		projectId = "syn123";
-		bundle = new DiscussionThreadBundle();
-		bundle.setForumId(forumId);
-		bundle.setProjectId(projectId);
-		forum = new Forum();
-		forum.setId(forumId);
-		forum.setProjectId(projectId);
-		when(mockThreadDao.getThread(Mockito.anyLong(), Mockito.any(DiscussionFilter.class))).thenReturn(bundle);
-
 		submissionId = "111";
 
 		Set<Long> groups = new HashSet<Long>();
@@ -300,13 +262,13 @@ public class AuthorizationManagerImplUnitTest {
 
 	@Test
 	public void testVerifyACTTeamMembershipOrIsAdmin_Admin() {
-		UserInfo adminInfo = new UserInfo(true);
+		UserInfo adminInfo = new UserInfo(true, 1L, DEFAULT_REALM_ID);
 		assertTrue(authorizationManager.isACTTeamMemberOrAdmin(adminInfo));
 	}
 	
 	@Test
 	public void testVerifyACTTeamMembershipOrIsAdminNullGroups() {
-		UserInfo adminInfo = new UserInfo(false);
+		UserInfo adminInfo = new UserInfo(false, 1L, DEFAULT_REALM_ID);
 		assertFalse(authorizationManager.isACTTeamMemberOrAdmin(adminInfo));
 	}
 
@@ -323,13 +285,13 @@ public class AuthorizationManagerImplUnitTest {
 
 	@Test
 	public void testVerifyReportTeamMembershipOrIsAdmin_Admin() {
-		UserInfo adminInfo = new UserInfo(true);
+		UserInfo adminInfo = new UserInfo(true, 1L, DEFAULT_REALM_ID);
 		assertTrue(authorizationManager.isReportTeamMemberOrAdmin(adminInfo));
 	}
 
 	@Test
 	public void testVerifyReportTeamMembershipOrIsAdminNullGroups() {
-		UserInfo adminInfo = new UserInfo(false);
+		UserInfo adminInfo = new UserInfo(false, 1L, DEFAULT_REALM_ID);
 		assertFalse(authorizationManager.isReportTeamMemberOrAdmin(adminInfo));
 	}
 
@@ -392,9 +354,9 @@ public class AuthorizationManagerImplUnitTest {
 	public void testCanAccessEvaluationAccessRequirement() throws Exception {
 		AccessRequirement ar = createEvaluationAccessRequirement();
 		assertFalse(authorizationManager.canAccess(userInfo, ar.getId().toString(), ObjectType.ACCESS_REQUIREMENT, ACCESS_TYPE.UPDATE).isAuthorized());
-		userInfo.setId(Long.parseLong(EVAL_OWNER_PRINCIPAL_ID));
+		UserInfo evalOwner = new UserInfo(false, Long.parseLong(EVAL_OWNER_PRINCIPAL_ID), DEFAULT_REALM_ID);
 		// only ACT may update an access requirement
-		assertFalse(authorizationManager.canAccess(userInfo, ar.getId().toString(), ObjectType.ACCESS_REQUIREMENT, ACCESS_TYPE.UPDATE).isAuthorized());
+		assertFalse(authorizationManager.canAccess(evalOwner, ar.getId().toString(), ObjectType.ACCESS_REQUIREMENT, ACCESS_TYPE.UPDATE).isAuthorized());
 	}
 
 	@Test
@@ -414,9 +376,9 @@ public class AuthorizationManagerImplUnitTest {
 	@Test
 	public void testCanAccessEvaluationAccessApprovalsForSubject() throws Exception {
 		assertFalse(authorizationManager.canAccessAccessApprovalsForSubject(userInfo, createEvaluationSubjectId(), ACCESS_TYPE.READ).isAuthorized());
-		userInfo.setId(Long.parseLong(EVAL_OWNER_PRINCIPAL_ID));
+		UserInfo evalOwner = new UserInfo(false, Long.parseLong(EVAL_OWNER_PRINCIPAL_ID), DEFAULT_REALM_ID);
 		// only ACT may review access approvals
-		assertFalse(authorizationManager.canAccessAccessApprovalsForSubject(userInfo, createEvaluationSubjectId(), ACCESS_TYPE.READ).isAuthorized());
+		assertFalse(authorizationManager.canAccessAccessApprovalsForSubject(evalOwner, createEvaluationSubjectId(), ACCESS_TYPE.READ).isAuthorized());
 	}
 	
 	@Test
@@ -625,9 +587,7 @@ public class AuthorizationManagerImplUnitTest {
 		assertFalse(authorizationManager.canAccess(userInfo, verificationId, ot, accessType).isAuthorized());
 		
 		// ACT can access
-		UserInfo actInfo = new UserInfo(false);
-		actInfo.setId(999L);
-		actInfo.setGroups(Collections.singleton(TeamConstants.ACT_TEAM_ID));
+		UserInfo actInfo = new UserInfo(false, 999L, DEFAULT_REALM_ID, Collections.singleton(TeamConstants.ACT_TEAM_ID));
 		when(mockVerificationDao.getVerificationSubmitter(verificationIdLong)).thenReturn(userInfo.getId()*13);
 		assertTrue(authorizationManager.canAccess(actInfo, verificationId, ot, accessType).isAuthorized());
 		
@@ -817,70 +777,6 @@ public class AuthorizationManagerImplUnitTest {
 		assertEquals(expected, results);
 	}
 	
-	@Test
-	public void testCanSubscribeForumUnauthorized() {
-		when(mockEntityAuthorizationManager.hasAccess(userInfo, projectId, ACCESS_TYPE.READ)).thenReturn(AuthorizationStatus.accessDenied(""));
-		when(mockForumDao.getForum(Long.parseLong(forumId))).thenReturn(forum);
-		assertEquals(AuthorizationStatus.accessDenied(""),
-				authorizationManager.canSubscribe(userInfo, forumId, SubscriptionObjectType.FORUM));
-	}
-
-	@Test
-	public void testCanSubscribeForumAuthorized() {
-		when(mockEntityAuthorizationManager.hasAccess(userInfo, projectId, ACCESS_TYPE.READ)).thenReturn(AuthorizationStatus.authorized());
-		when(mockForumDao.getForum(Long.parseLong(forumId))).thenReturn(forum);
-		assertEquals(AuthorizationStatus.authorized(),
-				authorizationManager.canSubscribe(userInfo, forumId, SubscriptionObjectType.FORUM));
-	}
-
-	@Test
-	public void testCanSubscribeThreadUnauthorized() {
-		when(mockEntityAuthorizationManager.hasAccess(userInfo, projectId, ACCESS_TYPE.READ)).thenReturn(AuthorizationStatus.accessDenied(""));
-		when(mockThreadDao.getProjectId(threadId)).thenReturn(projectId);
-		assertEquals(AuthorizationStatus.accessDenied(""),
-				authorizationManager.canSubscribe(userInfo, threadId, SubscriptionObjectType.THREAD));
-	}
-
-	@Test
-	public void testCanSubscribeThreadAuthorized() {
-		when(mockEntityAuthorizationManager.hasAccess(userInfo, projectId, ACCESS_TYPE.READ)).thenReturn(AuthorizationStatus.authorized());
-		when(mockThreadDao.getProjectId(threadId)).thenReturn(projectId);
-		assertEquals(AuthorizationStatus.authorized(),
-				authorizationManager.canSubscribe(userInfo, threadId, SubscriptionObjectType.THREAD));
-	}
-
-	@Test
-	public void testCanSubscribeDataAccessSubmissionUnauthorized() {
-		assertFalse(authorizationManager.canSubscribe(userInfo, submissionId, SubscriptionObjectType.DATA_ACCESS_SUBMISSION).isAuthorized());
-	}
-
-	@Test
-	public void testCanSubscribeDataAccessSubmissionAdminAuthorized() {
-		assertEquals(AuthorizationStatus.authorized(),
-				authorizationManager.canSubscribe(adminUser, submissionId, SubscriptionObjectType.DATA_ACCESS_SUBMISSION));
-	}
-
-	@Test
-	public void testCanSubscribeDataAccessSubmissionACTAuthorized() {
-		assertEquals(AuthorizationStatus.authorized(),
-				authorizationManager.canSubscribe(mockACTUser, submissionId, SubscriptionObjectType.DATA_ACCESS_SUBMISSION));
-	}
-
-	@Test
-	public void testCanSubscribeDataAccessSubmissionStatusUnauthorized() {
-		when(mockDataAccessSubmissionDao.isAccessor(submissionId, userInfo.getId().toString()))
-				.thenReturn(false);
-		assertFalse(authorizationManager.canSubscribe(userInfo, submissionId, SubscriptionObjectType.DATA_ACCESS_SUBMISSION_STATUS).isAuthorized());
-	}
-
-	@Test
-	public void testCanSubscribeDataAccessSubmissionStatusAuthorized() {
-		when(mockDataAccessSubmissionDao.isAccessor(submissionId, userInfo.getId().toString()))
-				.thenReturn(true);
-		assertEquals(AuthorizationStatus.authorized(),
-				authorizationManager.canSubscribe(userInfo, submissionId, SubscriptionObjectType.DATA_ACCESS_SUBMISSION_STATUS));
-	}
-
 	@Test
 	public void testValidParentProjectIdInvalidRepoName() {
 		assertEquals(null, authorizationManager.validDockerRepositoryParentId("/invalid/"));

@@ -56,10 +56,14 @@ public class InternalMessageDispatcher {
 		String method = bundle.getMessage().getMethod().get();
 		switch (method) {
 		case "connected":
+		case "replica-connected":
 			gridReplicaManager.onConnected(bundle.getProgressCallback(), bundle.getConnection());
 			return true;
 		case "new-patch":
 			gridReplicaManager.onNewPatch(bundle.getProgressCallback(), bundle.getConnection());
+			return true;
+		case "new-snapshot":
+			gridReplicaManager.onExportSnapshot(bundle.getProgressCallback(), bundle.getConnection());
 			return true;
 		default:
 			return false;

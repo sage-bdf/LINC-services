@@ -408,7 +408,7 @@ public class TableViewIntegrationTest {
 		query.setIncludeEntityEtag(true);
 
 		// run the query again
-		waitForConsistentQuery(adminUserInfo, query, (results) -> {			
+		waitForConsistentQuery(adminUserInfo, query, (results) -> {
 			assertNotNull(results);
 			assertEquals(new Long(fileCount), results.getQueryCount());
 			assertNotNull(results.getQueryResult());
@@ -419,7 +419,32 @@ public class TableViewIntegrationTest {
 			validateRowsMatchFiles(rows);
 		});
 	}
-	
+
+	@Test
+	public void testFileViewWithEtagReturnsBenefactorId() throws Exception {
+		createFileView();
+		// wait for replication
+		waitForEntityReplication(fileViewId);
+		Query query = new Query();
+		query.setSql("select * from " + fileViewId);
+		query.setIncludeEntityEtag(true);
+
+		Long expectedBenefactorId = KeyFactory.stringToKey(project.getId());
+
+		// call under test
+		waitForConsistentQuery(adminUserInfo, query, (results) -> {
+			assertNotNull(results);
+			assertEquals(new Long(fileCount), results.getQueryCount());
+			List<Row> rows = results.getQueryResult().getQueryResults().getRows();
+			assertEquals(fileCount, rows.size());
+			for (Row row : rows) {
+				FileEntity entity = entityManager.getEntity(adminUserInfo, "" + row.getRowId(), FileEntity.class);
+				assertEquals(entity.getEtag(), row.getEtag());
+				assertEquals(expectedBenefactorId, row.getBenefactorId());
+			}
+		});
+	}
+
 	@Test
 	public void testSumFileSizes() throws Exception{
 		createFileView();
@@ -1900,9 +1925,11 @@ public class TableViewIntegrationTest {
 			+ ObjectField.dataFileName
 		+ " from " + fileViewId + " where " + ObjectField.id + " = '" + fileZero+"'";
 		
+		Long projectBenefactorId = KeyFactory.stringToKey(project.getId());
 		List<Row> expectedRows = List.of(new Row()
 			.setRowId(KeyFactory.stringToKey(fileZero))
 			.setVersionNumber(1L)
+			.setBenefactorId(projectBenefactorId)
 			.setValues(List.of(
 				sharedHandle.getContentMd5().toString(),
 				sharedHandle.getContentSize().toString(),
@@ -1912,8 +1939,8 @@ public class TableViewIntegrationTest {
 				sharedHandle.getFileName()
 			))
 		);
-		
-		waitForConsistentQuery(adminUserInfo, sql, (results) -> {			
+
+		waitForConsistentQuery(adminUserInfo, sql, (results) -> {
 			assertEquals(expectedRows, extractRows(results));
 		});
 	}
@@ -2335,13 +2362,15 @@ public class TableViewIntegrationTest {
 		String sql = "select " + ObjectField.path + " from " + fileViewId + " where " + ObjectField.id + " = '"
 				+ fileZero + "'";
 		
+		Long projectBenefactorId = KeyFactory.stringToKey(project.getId());
 		List<Row> expectedRows = List.of(new Row()
 			.setRowId(KeyFactory.stringToKey(fileZero))
 			.setVersionNumber(1L)
+			.setBenefactorId(projectBenefactorId)
 			.setValues(List.of(expectedPath))
 		);
-		
-		waitForConsistentQuery(adminUserInfo, sql, (results) -> {			
+
+		waitForConsistentQuery(adminUserInfo, sql, (results) -> {
 			assertEquals(expectedRows, extractRows(results));
 		});
 	}
@@ -2437,6 +2466,49 @@ public class TableViewIntegrationTest {
 		});
 	}
 	
+	@Test
+	public void testViewWithMaxSizeStringAnnotation() throws Exception {
+		ColumnModel maxStringColumn = new ColumnModel();
+		maxStringColumn.setName("maxString");
+		maxStringColumn.setColumnType(ColumnType.STRING);
+		maxStringColumn.setMaximumSize(1000L);
+		maxStringColumn = columnModelManager.createColumnModel(adminUserInfo, maxStringColumn);
+
+		ColumnModel maxStringListColumn = new ColumnModel();
+		maxStringListColumn.setName("maxStringList");
+		maxStringListColumn.setColumnType(ColumnType.STRING_LIST);
+		maxStringListColumn.setMaximumSize(1000L);
+		maxStringListColumn.setMaximumListLength(100L);
+		maxStringListColumn = columnModelManager.createColumnModel(adminUserInfo, maxStringListColumn);
+
+		defaultColumnIds.add(maxStringColumn.getId());
+		defaultColumnIds.add(maxStringListColumn.getId());
+		createFileView();
+
+		String fileId = fileIds.get(0);
+		String maxSizeValue = "a".repeat(1000);
+
+		Annotations annos = entityManager.getAnnotations(adminUserInfo, fileId);
+		AnnotationsV2TestUtils.putAnnotations(annos, maxStringColumn.getName(), maxSizeValue, AnnotationsValueType.STRING);
+		AnnotationsV2TestUtils.putAnnotations(annos, maxStringListColumn.getName(), Arrays.asList(maxSizeValue), AnnotationsValueType.STRING);
+		entityManager.updateAnnotations(adminUserInfo, fileId, annos);
+		waitForEntityReplication(fileId);
+
+		// call under test - a max-size string annotation renders in full as a STRING column (sourced from STRING_VALUE)
+		waitForConsistentQuery(adminUserInfo,
+				"select " + maxStringColumn.getName() + " from " + fileViewId + " where id = '" + fileId + "'",
+				(results) -> {
+					List<Row> rows = extractRows(results);
+					assertEquals(1, rows.size());
+					assertEquals(maxSizeValue, rows.get(0).getValues().get(0));
+				});
+
+		// call under test - a max-size string annotation renders in full as a STRING_LIST column (sourced from STRING_LIST_VALUE)
+		waitForRowCount(adminUserInfo,
+				"select id from " + fileViewId + " where " + maxStringListColumn.getName() + " HAS ('" + maxSizeValue + "')",
+				1);
+	}
+
 	static void waitForDirectIndexQuery(Long userId, TableIndexDAO indexDAO, String sql, IdAndVersion viewId,
 			List<ColumnModel> schema, Function<List<Row>, Boolean> function) throws Exception {
 		// We need query the view's index directly to determine if the change

@@ -1,9 +1,10 @@
 package org.sagebionetworks.repo.model.dbo.grid;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
+import org.sagebionetworks.repo.model.grid.AuthorizationMode;
 import org.sagebionetworks.repo.model.grid.ClockTable;
 import org.sagebionetworks.repo.model.grid.EventSource;
 import org.sagebionetworks.repo.model.grid.GridConnectionInfo;
@@ -74,6 +75,15 @@ public interface GridDao {
 	Optional<Long> getReplicaCreatedBy(String sessionId, Long replicaId);
 
 	/**
+	 * Get the summary information (connection status and type) for a single replica.
+	 *
+	 * @param sessionId
+	 * @param replicaId
+	 * @return {@link Optional#empty()} if no replica with the given id exists in the session.
+	 */
+	Optional<GridReplicaInfo> getReplicaInfo(String sessionId, Long replicaId);
+
+	/**
 	 * List all replicas for a session with their connection status.
 	 *
 	 * @param sessionId
@@ -113,14 +123,18 @@ public interface GridDao {
      * @return
      */
     Optional<GridConnectionInfo> getSingletonConnection(String sessionId, EventSource source);
-    
+
     /**
+     * Get the connection a given user holds for the given session and event source.
+     * Unlike {@link #getSingletonConnection(String, EventSource)} this works for
+     * non-singleton sources, where each user has at most one connection per source.
+     *
      * @param sessionId
      * @param userId
      * @param source
-     * @return The internal connection for the given session and source created on behalf of the given user, if it exists.
+     * @return
      */
-	Optional<GridConnectionInfo> getSingletonUserConnection(String sessionId, Long userId, EventSource source);
+    Optional<GridConnectionInfo> getUserConnection(String sessionId, Long userId, EventSource source);
     
 	/**
 	 * Remove an actvie connection.
@@ -135,11 +149,10 @@ public interface GridDao {
 	 * @param sessionId
 	 * @param patchId
 	 * @param s3Key
-	 * @param expires
 	 * @param sizeBytes
 	 * @return True of this was a new patch, else false.
 	 */
-	boolean savePatch(String sessionId, LogicalTimestamp patchId, String s3Key, Duration expires, long sizeBytes);
+	boolean savePatch(String sessionId, LogicalTimestamp patchId, String s3Key, long sizeBytes);
 
 	/**
 	 * Save grid snapshot data.
@@ -169,6 +182,14 @@ public interface GridDao {
 	 * @return
 	 */
 	List<PatchInfo> listMissingPatchInfoForClock(String sessionId, List<LogicalTimestamp> clock, long limit);
+
+	/**
+	 * Count the number of patches that are newer than the provided clock for the given session.
+	 *
+	 * @param sessionId The grid session ID
+	 * @return The count of patches after the clock
+	 */
+	int countMissingPatchesForClock(String sessionId, List<LogicalTimestamp> clock);
 
 	/**
 	 * List the active grid session for a user filtered by the provided sourceId.
@@ -205,6 +226,45 @@ public interface GridDao {
 	Optional<GridSource> getSessionSource(String sessionId);
 
 	/**
+	 * Get the authorization mode for a grid session.
+	 * Returns Optional.empty() if the session does not exist.
+	 * A null stored value indicates SESSION_OWNER (the default).
+	 * @param sessionId
+	 * @return
+	 */
+	Optional<AuthorizationMode> getAuthorizationMode(String sessionId);
+
+	/**
+	 * Update the benefactor IDs JSON column for a grid session.
+	 * @param sessionId
+	 * @param benefactorIds
+	 */
+	void updateSessionBenefactorIds(String sessionId, Set<Long> benefactorIds);
+
+	/**
+	 * Update the synchronized source entity version number for a grid session.
+	 * @param sessionId
+	 * @param sourceVersion
+	 */
+	void updateSourceEntityVersion(String sessionId, Long sourceVersion);
+
+	/**
+	 * Update the bound JSON schema $id recorded on a grid session. This is the
+	 * schema the grid's rows are validated against; it is updated when the source's
+	 * bound schema changes during synchronization.
+	 * @param sessionId
+	 * @param schemaId
+	 */
+	void updateSessionSchemaId(String sessionId, String schemaId);
+
+	/**
+	 * Get the set of benefactor IDs stored for a grid session.
+	 * @param sessionId
+	 * @return Empty set if no benefactor IDs have been stored.
+	 */
+	Set<Long> getSessionBenefactorIds(String sessionId);
+
+	/**
 	 * Gets the latest grid snapshot, based on created date
 	 * @param sessionId
 	 * @return
@@ -219,4 +279,5 @@ public interface GridDao {
 	 * @return
 	 */
 	List<String> listAllSessionIds(long limit, long offset);
+
 }

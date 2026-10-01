@@ -6,7 +6,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Random;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -26,6 +25,7 @@ import org.sagebionetworks.repo.model.entity.IdAndVersion;
 import org.sagebionetworks.repo.model.jdo.KeyFactory;
 import org.sagebionetworks.repo.model.message.ChangeMessage;
 import org.sagebionetworks.repo.model.message.ChangeType;
+import org.sagebionetworks.repo.model.table.ColumnConstants;
 import org.sagebionetworks.repo.model.table.ObjectDataDTO;
 import org.sagebionetworks.repo.model.table.ReplicatedEvent;
 import org.sagebionetworks.repo.model.table.ReplicationType;
@@ -47,7 +47,7 @@ public class ReplicationManagerImpl implements ReplicationManager {
 	
 	private final Logger log;
 
-	public static final int MAX_ANNOTATION_CHARS = 500;
+	public static final int MAX_ANNOTATION_CHARS = ColumnConstants.MAX_ALLOWED_STRING_SIZE.intValue();
 	
 	public static final int MAX_MESSAGE_PAGE_SIZE = 1000;
 	
@@ -60,7 +60,7 @@ public class ReplicationManagerImpl implements ReplicationManager {
 	
 	final private TableIndexConnectionFactory indexConnectionFactory;
 	
-	final private Random random;
+	final private SaltProvider saltProvider;
 	
 	final private RepositoryMessagePublisher messagePublisher;
 
@@ -71,14 +71,14 @@ public class ReplicationManagerImpl implements ReplicationManager {
 			ReplicationMessageManager replicationMessageManager, 
 			TableIndexConnectionFactory indexConnectionFactory,
 			MetadataIndexProviderFactory indexProviderFactory, LoggerProvider logProvider,
-			Random random, RepositoryMessagePublisher messagePublisher) {
+			SaltProvider saltProvider, RepositoryMessagePublisher messagePublisher) {
 		this.objectDataProviderFactory = objectDataProviderFactory;
 		this.tableManagerSupport = tableManagerSupport;
 		this.replicationMessageManager = replicationMessageManager;
 		this.indexConnectionFactory = indexConnectionFactory;
 		this.indexProviderFactory = indexProviderFactory;
 		this.log = logProvider.getLogger(ReplicationManagerImpl.class.getName());
-		this.random = random;
+		this.saltProvider = saltProvider;
 		this.messagePublisher = messagePublisher;
 	}
 
@@ -310,7 +310,7 @@ public class ReplicationManagerImpl implements ReplicationManager {
 	 */
 	Iterator<ChangeMessage> createReconcileIterator(ViewFilter filter) {
 		ValidateArgument.required(filter, "filter");
-		long salt = random.nextLong();
+		long salt = saltProvider.nextLong();
 		Iterator<IdAndChecksum> truthStream = createTruthStream(salt, filter);
 		TableIndexManager indexManager = indexConnectionFactory.connectToFirstIndex();
 		Iterator<IdAndChecksum> replicationStream = indexManager.streamOverIdsAndChecksums(salt, filter);

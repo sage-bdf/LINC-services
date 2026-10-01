@@ -9,7 +9,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyZeroInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 import static org.sagebionetworks.repo.manager.schema.SynapseSchemaBootstrapImpl.OBJECTS_TO_BOOTSTRAP;
 
@@ -24,6 +24,7 @@ import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.sagebionetworks.repo.manager.UserManager;
+import org.sagebionetworks.repo.model.AuthorizationConstants;
 import org.sagebionetworks.repo.model.AuthorizationConstants.BOOTSTRAP_PRINCIPAL;
 import org.sagebionetworks.repo.model.Entity;
 import org.sagebionetworks.repo.model.EntityType;
@@ -79,7 +80,7 @@ public class SynapseSchemaBootstrapImplTest {
 	public void before() {
 		bootstrapSpy = Mockito.spy(bootstrap);
 		boolean isAdmin = true;
-		admin = new UserInfo(isAdmin, 123L);
+		admin = new UserInfo(isAdmin, 123L, AuthorizationConstants.DEFAULT_REALM_ID);
 		organizationName = "org.sagebionetworks";
 		
 		organziation = new Organization();
@@ -250,7 +251,7 @@ public class SynapseSchemaBootstrapImplTest {
 		bootstrapSpy.registerSchemaIfDoesNotExist(admin, jsonSchema);
 		verify(bootstrapSpy).getNextPatchNumberIfNeeded(organizationName, schemaName, jsonSchema);
 		// empty optional signals there is no work to do.
-		verifyZeroInteractions(mockJsonSchemaManager);
+		verifyNoMoreInteractions(mockJsonSchemaManager);
 	}
 	
 	@Test
@@ -274,7 +275,7 @@ public class SynapseSchemaBootstrapImplTest {
 		// call under test
 		bootstrap.createOrganizationIfDoesNotExist(admin);
 		verify(mockJsonSchemaManager).getOrganizationByName(admin, organizationName);
-		verifyZeroInteractions(mockJsonSchemaManager);
+		verifyNoMoreInteractions(mockJsonSchemaManager);
 	}
 	
 	@Test

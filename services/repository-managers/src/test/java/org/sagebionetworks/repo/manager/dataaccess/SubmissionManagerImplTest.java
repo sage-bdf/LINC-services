@@ -17,7 +17,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyZeroInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
@@ -28,6 +28,7 @@ import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -44,6 +45,8 @@ import org.sagebionetworks.repo.model.AccessApprovalDAO;
 import org.sagebionetworks.repo.model.AccessRequirement;
 import org.sagebionetworks.repo.model.AccessRequirementDAO;
 import org.sagebionetworks.repo.model.ApprovalState;
+import org.sagebionetworks.repo.model.AuthorizationConstants;
+import org.sagebionetworks.repo.model.JsonSchemaAccessRequirement;
 import org.sagebionetworks.repo.model.ManagedACTAccessRequirement;
 import org.sagebionetworks.repo.model.NextPageToken;
 import org.sagebionetworks.repo.model.ObjectType;
@@ -88,7 +91,13 @@ import org.sagebionetworks.repo.model.dataaccess.UserSubmissionSearchRequest;
 import org.sagebionetworks.repo.model.dataaccess.UserSubmissionSearchResponse;
 import org.sagebionetworks.repo.model.dataaccess.UserSubmissionSearchResult;
 import org.sagebionetworks.repo.model.dbo.dao.dataaccess.ResearchProjectDAO;
+import org.sagebionetworks.ids.IdGenerator;
+import org.sagebionetworks.repo.model.UploadContentToS3DAO;
 import org.sagebionetworks.repo.model.dbo.dao.dataaccess.SubmissionDAO;
+import org.sagebionetworks.repo.model.dbo.dao.discussion.DiscussionThreadDAO;
+import org.sagebionetworks.repo.model.dbo.dao.discussion.ForumDAO;
+import org.sagebionetworks.repo.model.discussion.Forum;
+import org.sagebionetworks.repo.model.discussion.ForumObjectType;
 import org.sagebionetworks.repo.model.message.ChangeType;
 import org.sagebionetworks.repo.model.message.MessageToSend;
 import org.sagebionetworks.repo.model.message.TransactionalMessenger;
@@ -126,6 +135,14 @@ public class SubmissionManagerImplTest {
 	private RequestManager mockRequestManager;
 	@Mock
 	private DataAccessAuthorizationManager mockAuthManager;
+	@Mock
+	private ForumDAO mockForumDao;
+	@Mock
+	private DiscussionThreadDAO mockThreadDao;
+	@Mock
+	private UploadContentToS3DAO mockUploadDao;
+	@Mock
+	private IdGenerator mockIdGenerator;
 	@InjectMocks
 	private SubmissionManagerImpl manager;
 	@Captor
@@ -153,6 +170,7 @@ public class SubmissionManagerImplTest {
 	private String subjectId;
 	
 	private UserInfo actUser;
+	private Forum mockForum;
 
 	@BeforeEach
 	public void before() {
@@ -177,8 +195,7 @@ public class SubmissionManagerImplTest {
 		accessorIds = Sets.newHashSet(userId);
 		
 		boolean isAdmin = false;
-		actUser = new UserInfo(isAdmin, 5L);
-		actUser.setGroups(Sets.newHashSet(TeamConstants.ACT_TEAM_ID));
+		actUser = new UserInfo(isAdmin, 5L, AuthorizationConstants.DEFAULT_REALM_ID, Sets.newHashSet(TeamConstants.ACT_TEAM_ID));
 
 		request = new Renewal();
 		request.setId(requestId);
@@ -212,6 +229,11 @@ public class SubmissionManagerImplTest {
 				.thenReturn(mockSubmissionStatus);
 		lenient().when(mockSubmissionStatus.getSubmissionId()).thenReturn(submissionId);
 		lenient().when(mockAccessApprovalDao.hasApprovalsSubmittedBy(accessorIds, userId, accessRequirementId)).thenReturn(true);
+
+		mockForum = new Forum();
+		mockForum.setId("100");
+		mockForum.setObjectId(accessRequirementId);
+		mockForum.setObjectType(ForumObjectType.ACCESS_REQUIREMENT);
 
 		submission = new Submission();
 		submission.setRequestId(requestId);
@@ -435,6 +457,8 @@ public class SubmissionManagerImplTest {
 
 	@Test
 	public void testCreate() {
+		when(mockForumDao.getForumByObjectIdAndType(accessRequirementId, ForumObjectType.ACCESS_REQUIREMENT))
+				.thenReturn(mockForum);
 		manager.create(mockUser, csRequest);
 		ArgumentCaptor<Submission> submissionCaptor = ArgumentCaptor.forClass(Submission.class);
 		verify(mockSubmissionDao).createSubmission(submissionCaptor.capture());
@@ -476,6 +500,51 @@ public class SubmissionManagerImplTest {
 	}
 
 	@Test
+	public void testCreateWithJsonSchemaAccessRequirement() {
+		// the schema based requirement describes the IRB approval and the attachments through its bound
+		// schema, so the request level documents other than the DUC are not collected
+		JsonSchemaAccessRequirement jsonSchemaAr = new JsonSchemaAccessRequirement()
+			.setVersionNumber(accessRequirementVersion)
+			.setIsDUCRequired(true);
+		when(mockAccessRequirementDao.get(accessRequirementId)).thenReturn(jsonSchemaAr);
+		when(mockForumDao.getForumByObjectIdAndType(accessRequirementId, ForumObjectType.ACCESS_REQUIREMENT))
+				.thenReturn(mockForum);
+
+		// call under test
+		manager.create(mockUser, csRequest);
+
+		ArgumentCaptor<Submission> submissionCaptor = ArgumentCaptor.forClass(Submission.class);
+		verify(mockSubmissionDao).createSubmission(submissionCaptor.capture());
+		Submission captured = submissionCaptor.getValue();
+		assertEquals(accessRequirementId, captured.getAccessRequirementId());
+		assertEquals(accessRequirementVersion, captured.getAccessRequirementVersion());
+		assertEquals(ducFileHandleId, captured.getDucFileHandleId());
+		assertNull(captured.getIrbFileHandleId());
+		assertNull(captured.getAttachments());
+		assertEquals(accessors, captured.getAccessorChanges());
+		assertEquals(SubmissionState.SUBMITTED, captured.getState());
+
+		verify(mockAccessAprovalManager).validateHasAccessorRequirement(jsonSchemaAr, accessorIds);
+	}
+
+	@Test
+	public void testCreateWithJsonSchemaAccessRequirementAndMissingDUC() {
+		JsonSchemaAccessRequirement jsonSchemaAr = new JsonSchemaAccessRequirement()
+			.setVersionNumber(accessRequirementVersion)
+			.setIsDUCRequired(true);
+		when(mockAccessRequirementDao.get(accessRequirementId)).thenReturn(jsonSchemaAr);
+		request.setDucFileHandleId(null);
+
+		String message = assertThrows(IllegalArgumentException.class, () -> {
+			// call under test
+			manager.create(mockUser, csRequest);
+		}).getMessage();
+
+		assertEquals("You must provide a Data Use Certification document.", message);
+		verify(mockSubmissionDao, never()).createSubmission(any());
+	}
+
+	@Test
 	public void testCreateWithNonRenewal() {
 		Request request = new Request();
 		request.setId(requestId);
@@ -487,6 +556,8 @@ public class SubmissionManagerImplTest {
 		request.setAccessorChanges(accessors);
 		request.setEtag(etag);
 		when(mockRequestManager.getRequestForSubmission(requestId)).thenReturn(request);
+		when(mockForumDao.getForumByObjectIdAndType(accessRequirementId, ForumObjectType.ACCESS_REQUIREMENT))
+				.thenReturn(mockForum);
 		manager.create(mockUser, csRequest);
 		ArgumentCaptor<Submission> submissionCaptor = ArgumentCaptor.forClass(Submission.class);
 		verify(mockSubmissionDao).createSubmission(submissionCaptor.capture());
@@ -879,6 +950,36 @@ public class SubmissionManagerImplTest {
 	}
 
 	@Test
+	public void testUpdateStatusApprovedWithJsonSchemaAccessRequirement() {
+		long expirationPeriod = 30*24*60*60*1000L;
+		when(mockAccessRequirementDao.get(accessRequirementId))
+			.thenReturn(new JsonSchemaAccessRequirement().setExpirationPeriod(expirationPeriod));
+		SubmissionStateChangeRequest request = new SubmissionStateChangeRequest();
+		request.setSubmissionId(submissionId);
+		request.setNewState(SubmissionState.APPROVED);
+		submission.setAccessorChanges(accessors);
+
+		when(mockSubmissionDao.getForUpdate(submissionId)).thenReturn(submission);
+		when(mockSubmissionDao.updateSubmissionStatus(eq(submissionId),
+				eq(SubmissionState.APPROVED), eq(null), eq(actUser.getId().toString()),
+				anyLong())).thenReturn(submission);
+		when(mockAuthManager.canReviewAccessRequirementSubmissions(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
+		// call under test
+		assertEquals(submission, manager.updateStatus(actUser, request));
+
+		ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
+		verify(mockAccessApprovalDao).createOrUpdateBatch(captor.capture());
+		List<AccessApproval> approvals = captor.getValue();
+		assertEquals(1, approvals.size());
+		AccessApproval approval = approvals.get(0);
+		assertEquals(ApprovalState.APPROVED, approval.getState());
+		// the expiration period of the schema based requirement drives the approval expiration
+		assertNotNull(approval.getExpiredOn());
+		verify(mockRequestManager).updateApprovedRequest(requestId);
+	}
+
+	@Test
 	public void testListSubmissionsWithNullUserInfo() {
 		assertThrows(IllegalArgumentException.class, ()->{
 			manager.listSubmission(null, new SubmissionPageRequest());
@@ -1151,6 +1252,24 @@ public class SubmissionManagerImplTest {
 		ManagedACTAccessRequirementStatus actARStatus = (ManagedACTAccessRequirementStatus) arStatus;
 		assertEquals(mockSubmissionStatus, actARStatus.getCurrentSubmissionStatus());
 		verify(mockAccessRequirementDao).getConcreteType(accessRequirementId);
+		verify(mockSubmissionDao).getStatusByRequirementIdAndPrincipalId(accessRequirementId, userId);
+	}
+
+	@Test
+	public void testGetAccessRequirementStatusWithJsonSchemaAR() {
+		when(mockAccessRequirementDao.getConcreteType(accessRequirementId))
+			.thenReturn(JsonSchemaAccessRequirement.class.getName());
+		when(mockSubmissionDao.getStatusByRequirementIdAndPrincipalId(accessRequirementId, userId))
+			.thenReturn(mockSubmissionStatus);
+
+		// call under test
+		AccessRequirementStatus arStatus = manager.getAccessRequirementStatus(mockUser, accessRequirementId);
+
+		assertTrue(arStatus instanceof ManagedACTAccessRequirementStatus);
+		assertEquals(accessRequirementId, arStatus.getAccessRequirementId());
+		assertFalse(arStatus.getIsApproved());
+		assertNull(arStatus.getExpiredOn());
+		assertEquals(mockSubmissionStatus, ((ManagedACTAccessRequirementStatus) arStatus).getCurrentSubmissionStatus());
 		verify(mockSubmissionDao).getStatusByRequirementIdAndPrincipalId(accessRequirementId, userId);
 	}
 
@@ -1667,9 +1786,9 @@ public class SubmissionManagerImplTest {
 		
 		assertEquals(expected, result);
 		
-		verifyZeroInteractions(mockSubmissionDao);
-		verifyZeroInteractions(mockAccessRequirementDao);
-		verifyZeroInteractions(mockAuthManager);
+		verifyNoMoreInteractions(mockSubmissionDao);
+		verifyNoMoreInteractions(mockAccessRequirementDao);
+		verifyNoMoreInteractions(mockAuthManager);
 		
 	}
 	
@@ -1771,7 +1890,7 @@ public class SubmissionManagerImplTest {
 		assertEquals(result, submission);
 
 		verify(mockSubmissionDao).getSubmission(submissionId);
-		verifyZeroInteractions(mockAuthManager);
+		verifyNoMoreInteractions(mockAuthManager);
 	}
 
 	@Test
@@ -1817,8 +1936,8 @@ public class SubmissionManagerImplTest {
 		
 		assertEquals("userInfo is required.", result);
 		
-		verifyZeroInteractions(mockSubmissionDao);
-		verifyZeroInteractions(mockAuthManager);
+		verifyNoMoreInteractions(mockSubmissionDao);
+		verifyNoMoreInteractions(mockAuthManager);
 	}
 	
 	@Test
@@ -1831,8 +1950,8 @@ public class SubmissionManagerImplTest {
 		
 		assertEquals("submissionId is required.", result);
 		
-		verifyZeroInteractions(mockSubmissionDao);
-		verifyZeroInteractions(mockAuthManager);
+		verifyNoMoreInteractions(mockSubmissionDao);
+		verifyNoMoreInteractions(mockAuthManager);
 	}
 
 	@Test
@@ -1845,8 +1964,8 @@ public class SubmissionManagerImplTest {
 
 		assertEquals("submissionId is required.", result);
 
-		verifyZeroInteractions(mockSubmissionDao);
-		verifyZeroInteractions(mockAccessApprovalDao);
+		verifyNoMoreInteractions(mockSubmissionDao);
+		verifyNoMoreInteractions(mockAccessApprovalDao);
 	}
 
 	@Test
@@ -1859,8 +1978,8 @@ public class SubmissionManagerImplTest {
 
 		assertEquals("userInfo is required.", result);
 
-		verifyZeroInteractions(mockSubmissionDao);
-		verifyZeroInteractions(mockAccessApprovalDao);
+		verifyNoMoreInteractions(mockSubmissionDao);
+		verifyNoMoreInteractions(mockAccessApprovalDao);
 	}
 
 	@Test
@@ -1876,7 +1995,7 @@ public class SubmissionManagerImplTest {
 		assertEquals("The user is not an accessor to the submission.", result);
 
 		verify(mockSubmissionDao).getSubmission(submissionId);
-		verifyZeroInteractions(mockAccessApprovalDao);
+		verifyNoMoreInteractions(mockAccessApprovalDao);
 	}
 
 	@Test
@@ -1955,9 +2074,9 @@ public class SubmissionManagerImplTest {
 
 		assertEquals("request is required.", result);
 
-		verifyZeroInteractions(mockSubmissionDao);
-		verifyZeroInteractions(mockAccessApprovalDao);
-		verifyZeroInteractions(mockAccessRequirementDao);
+		verifyNoMoreInteractions(mockSubmissionDao);
+		verifyNoMoreInteractions(mockAccessApprovalDao);
+		verifyNoMoreInteractions(mockAccessRequirementDao);
 	}
 
 	@Test
@@ -1970,9 +2089,9 @@ public class SubmissionManagerImplTest {
 
 		assertEquals("userInfo is required.", result);
 
-		verifyZeroInteractions(mockSubmissionDao);
-		verifyZeroInteractions(mockAccessApprovalDao);
-		verifyZeroInteractions(mockAccessRequirementDao);
+		verifyNoMoreInteractions(mockSubmissionDao);
+		verifyNoMoreInteractions(mockAccessApprovalDao);
+		verifyNoMoreInteractions(mockAccessRequirementDao);
 	}
 
 	@Test
@@ -2041,8 +2160,8 @@ public class SubmissionManagerImplTest {
 				request.getAccessRequirementId(), null, request.getSubmissionState(),
 				NextPageToken.DEFAULT_LIMIT + 1, NextPageToken.DEFAULT_OFFSET);
 
-		verifyZeroInteractions(mockAccessApprovalDao);
-		verifyZeroInteractions(mockAccessRequirementDao);
+		verifyNoMoreInteractions(mockAccessApprovalDao);
+		verifyNoMoreInteractions(mockAccessRequirementDao);
 	}
 
 	@Test
@@ -2087,5 +2206,29 @@ public class SubmissionManagerImplTest {
 
 		verify(mockAccessApprovalDao).searchAccessApprovalsForSubmission(Set.of(Long.parseLong(submission.getId())), userId);
 		verify(mockAccessRequirementDao).getAccessRequirementNames(Set.of(Long.parseLong(accessRequirementId)));
+	}
+
+	@Test
+	public void testGetSubmissionForThreadAuthorized() {
+		String threadId = "555";
+		submission.setAccessorChanges(Collections.emptyList());
+		when(mockThreadDao.getSubmissionIdForThread(threadId)).thenReturn(Optional.of(submissionId));
+		when(mockAuthManager.canReviewAccessRequirementSubmissions(any(), any())).thenReturn(AuthorizationStatus.authorized());
+		when(mockSubmissionDao.getSubmission(any())).thenReturn(submission);
+		// call under test
+		Submission result = manager.getSubmissionForThread(mockUser, threadId);
+		assertNotNull(result);
+		assertEquals(submission, result);
+		verify(mockAuthManager).canReviewAccessRequirementSubmissions(mockUser, accessRequirementId);
+	}
+
+	@Test
+	public void testGetSubmissionForThreadNotFound() {
+		String threadId = "555";
+		when(mockThreadDao.getSubmissionIdForThread(threadId)).thenReturn(Optional.empty());
+		// call under test
+		assertThrows(NotFoundException.class, () -> {
+			manager.getSubmissionForThread(mockUser, threadId);
+		});
 	}
 }

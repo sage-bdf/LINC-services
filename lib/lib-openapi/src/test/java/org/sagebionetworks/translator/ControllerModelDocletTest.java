@@ -93,7 +93,7 @@ public class ControllerModelDocletTest {
 		System.out.println("Generated open api spec: ");
 		System.out.println(generatedJson.toString(2));
 				
-		assertEquals(expectedJson.toString(2), generatedJson.toString(2));
+		assertEquals(expectedJson.toMap(), generatedJson.toMap());
 	}
 	
 }

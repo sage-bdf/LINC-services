@@ -16,7 +16,7 @@ import org.sagebionetworks.repo.model.table.ColumnModel;
 import org.sagebionetworks.repo.model.table.SelectColumn;
 import org.sagebionetworks.repo.model.table.TableConstants;
 import org.sagebionetworks.table.cluster.description.ColumnToAdd;
-import org.sagebionetworks.table.cluster.description.IndexDescription;
+import org.sagebionetworks.table.cluster.description.QueryIndexDescription;
 import org.sagebionetworks.table.cluster.utils.TableModelUtils;
 import org.sagebionetworks.table.query.ParseException;
 import org.sagebionetworks.table.query.TableQueryParser;
@@ -76,6 +76,11 @@ public class QueryTranslator implements TranslatedQuery {
 	private final boolean includeEntityEtag;
 
 	/**
+	 * Should the query results include the row's benefactorId? True for non-aggregate view queries.
+	 */
+	private final boolean includeBenefactorId;
+
+	/**
 	 * Aggregated results are queries that included one or more aggregation
 	 * functions in the select clause. These query results will not match columns in
 	 * the table. In addition rowIDs and rowVersionNumbers will be null when
@@ -92,7 +97,7 @@ public class QueryTranslator implements TranslatedQuery {
 
 	private final List<ColumnModel> schemaOfSelect;
 
-	private final IndexDescription indexDescription;
+	private final QueryIndexDescription indexDescription;
 
 	private final SqlContext sqlContext;
 	
@@ -111,7 +116,7 @@ public class QueryTranslator implements TranslatedQuery {
 	 * @throws ParseException
 	 */
 	QueryTranslator(String startingSql, SchemaProvider schemaProvider, Long maxBytesPerPage,
-			Boolean includeEntityEtag, Long userId, IndexDescription indexDescription, SqlContext sqlContextIn, Long changeNumber) {
+			Boolean includeEntityEtag, Long userId, QueryIndexDescription indexDescription, SqlContext sqlContextIn, Long changeNumber) {
 		ValidateArgument.required(schemaProvider, "schemaProvider");
 		ValidateArgument.required(indexDescription, "indexDescription");
 		this.tableHash = indexDescription.getTableHash();
@@ -179,6 +184,7 @@ public class QueryTranslator implements TranslatedQuery {
 			// Track if this is an aggregate query.
 			this.isAggregatedResult = transformedModel.hasAnyAggregateElements();
 			this.includesRowIdAndVersion = !this.isAggregatedResult && !this.isCommonTableExpression;
+			this.includeBenefactorId = this.includesRowIdAndVersion && indexDescription.getTableType().isViewEntityType();
 			// Build headers that describe how the client should read the results of this
 			// query.
 			this.selectColumns = SQLTranslatorUtils.getSelectColumns(firstPart.getQuerySpecification().getSelectList(), firstPart.getMapper(),
@@ -255,11 +261,16 @@ public class QueryTranslator implements TranslatedQuery {
 
 	/**
 	 * Does this query include ROW_ETAG
-	 * 
+	 *
 	 * @return
 	 */
 	public boolean getIncludeEntityEtag() {
 		return this.includeEntityEtag;
+	}
+
+	@Override
+	public boolean getIncludeBenefactorId() {
+		return this.includeBenefactorId;
 	}
 
 	/**
@@ -297,7 +308,7 @@ public class QueryTranslator implements TranslatedQuery {
 	 * 
 	 * @return
 	 */
-	boolean isAggregatedResult() {
+	public boolean isAggregatedResult() {
 		return isAggregatedResult;
 	}
 
@@ -397,7 +408,7 @@ public class QueryTranslator implements TranslatedQuery {
 		return isIncludeSearch;
 	}
 
-	public IndexDescription getIndexDescription() {
+	public QueryIndexDescription getIndexDescription() {
 		return this.indexDescription;
 	}
 
@@ -441,7 +452,7 @@ public class QueryTranslator implements TranslatedQuery {
 		private Long maxBytesPerPage;
 		private Boolean includeEntityEtag;
 		private Long userId;
-		private IndexDescription indexDescription;
+		private QueryIndexDescription indexDescription;
 		private SqlContext sqlContext;
 		private Long changeNumber;
 		
@@ -479,7 +490,7 @@ public class QueryTranslator implements TranslatedQuery {
 		}
 		
 		
-		public Builder indexDescription(IndexDescription indexDescription) {
+		public Builder indexDescription(QueryIndexDescription indexDescription) {
 			this.indexDescription = indexDescription;
 			return this;
 		}

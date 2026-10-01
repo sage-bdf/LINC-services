@@ -10,14 +10,16 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyZeroInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import static org.sagebionetworks.repo.model.table.TableConstants.ROW_BENEFACTOR;
 import static org.sagebionetworks.repo.model.table.TableConstants.ROW_ETAG;
 import static org.sagebionetworks.repo.model.table.TableConstants.ROW_ID;
 import static org.sagebionetworks.repo.model.table.TableConstants.ROW_VERSION;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -45,11 +47,13 @@ import org.sagebionetworks.repo.model.entity.IdAndVersion;
 import org.sagebionetworks.repo.model.table.ColumnConstants;
 import org.sagebionetworks.repo.model.table.ColumnModel;
 import org.sagebionetworks.repo.model.table.ColumnMultiValueFunction;
+import org.sagebionetworks.repo.model.table.BooleanOperator;
 import org.sagebionetworks.repo.model.table.ColumnMultiValueFunctionQueryFilter;
 import org.sagebionetworks.repo.model.table.ColumnSingleValueFilterOperator;
 import org.sagebionetworks.repo.model.table.ColumnSingleValueQueryFilter;
 import org.sagebionetworks.repo.model.table.ColumnType;
 import org.sagebionetworks.repo.model.table.FacetType;
+import org.sagebionetworks.repo.model.table.FilterGroup;
 import org.sagebionetworks.repo.model.table.JsonSubColumnModel;
 import org.sagebionetworks.repo.model.table.QueryFilter;
 import org.sagebionetworks.repo.model.table.Row;
@@ -508,6 +512,72 @@ public class SQLTranslatorUtilsTest {
 	}
 
 	@Test
+	public void testGetSelectColumnsConcatAliasMatchingSourceColumn() throws ParseException {
+		when(mapper.lookupColumnReference(any())).thenReturn(Optional.of(new SchemaColumnTranslationReference(columnFoo)));
+
+		DerivedColumn derivedColumn = new TableQueryParser("concat('[', foo, '](', id, ')') as foo").derivedColumn();
+		// call under test
+		SelectColumn results = SQLTranslatorUtils.getSelectColumns(derivedColumn, mapper);
+		assertNotNull(results);
+		assertEquals("foo", results.getName());
+		assertEquals(ColumnType.STRING, results.getColumnType());
+		assertEquals(columnFoo.getId(), results.getId());
+	}
+
+	@Test
+	public void testGetSelectColumnsConcatAliasNotInSchema() throws ParseException {
+		when(mapper.lookupColumnReference(any())).thenReturn(Optional.of(new SchemaColumnTranslationReference(columnFoo)));
+
+		DerivedColumn derivedColumn = new TableQueryParser("concat('[', foo, '](', id, ')') as new_alias").derivedColumn();
+		// call under test
+		SelectColumn results = SQLTranslatorUtils.getSelectColumns(derivedColumn, mapper);
+		assertNotNull(results);
+		assertEquals("new_alias", results.getName());
+		assertEquals(ColumnType.STRING, results.getColumnType());
+		assertNull(results.getId());
+	}
+
+	@Test
+	public void testGetSelectColumnsConcatAliasIsQuotedHyphenatedName() throws ParseException {
+		// Hyphens in an identifier require a double-quoted alias; the resulting name is verbatim.
+		when(mapper.lookupColumnReference(any())).thenReturn(Optional.of(new SchemaColumnTranslationReference(columnFoo)));
+
+		DerivedColumn derivedColumn = new TableQueryParser("concat('[', foo, '](', id, ')') as \"non-existant-column\"").derivedColumn();
+		// call under test
+		SelectColumn results = SQLTranslatorUtils.getSelectColumns(derivedColumn, mapper);
+		assertNotNull(results);
+		assertEquals("non-existant-column", results.getName());
+		assertEquals(ColumnType.STRING, results.getColumnType());
+		assertNull(results.getId());
+	}
+
+	@Test
+	public void testGetSelectColumnsLiteralWithAlias() throws ParseException {
+		when(mapper.lookupColumnReference(any())).thenReturn(Optional.empty());
+
+		DerivedColumn derivedColumn = new TableQueryParser("'usedInBridge2AI' as usedInBridge2AI").derivedColumn();
+		// call under test
+		SelectColumn results = SQLTranslatorUtils.getSelectColumns(derivedColumn, mapper);
+		assertNotNull(results);
+		assertEquals("usedInBridge2AI", results.getName());
+		assertEquals(ColumnType.STRING, results.getColumnType());
+		assertNull(results.getId());
+	}
+
+	@Test
+	public void testGetSelectColumnsBareDoubleQuotedUnknownIdentifier() throws ParseException {
+		// Double-quoted strings parse as identifiers, not literals; an unknown identifier throws.
+		when(mapper.lookupColumnReference(any())).thenReturn(Optional.empty());
+
+		DerivedColumn derivedColumn = new TableQueryParser("\"usedInBridge2AI\"").derivedColumn();
+		// call under test
+		IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+				() -> SQLTranslatorUtils.getSelectColumns(derivedColumn, mapper));
+		assertTrue(ex.getMessage().contains("Unknown column"));
+		assertTrue(ex.getMessage().contains("usedInBridge2AI"));
+	}
+
+	@Test
 	public void testGetSelectColumnsCurrentUser() throws ParseException{
 		
 		DerivedColumn derivedColumn = new TableQueryParser("current_user()").derivedColumn();
@@ -593,7 +663,7 @@ public class SQLTranslatorUtilsTest {
 		assertEquals("anInt", results.getName());
 		assertEquals(ColumnType.INTEGER, results.getColumnType());
 		assertEquals(null, results.getId());
-		verifyZeroInteractions(mapper);
+		verifyNoMoreInteractions(mapper);
 	}
 	
 	@Test
@@ -605,7 +675,7 @@ public class SQLTranslatorUtilsTest {
 		assertEquals("CAST(foo AS INTEGER)", results.getName());
 		assertEquals(ColumnType.INTEGER, results.getColumnType());
 		assertEquals(null, results.getId());
-		verifyZeroInteractions(mapper);
+		verifyNoMoreInteractions(mapper);
 	}
 	
 	@Test
@@ -785,10 +855,11 @@ public class SQLTranslatorUtilsTest {
 		boolean withHeaders = true;
 		boolean withEtag = true;
 		// call under test.
-		Row result = SQLTranslatorUtils.readRow(mockResultSet, withHeaders, withEtag, infoArray);
+		Row result = SQLTranslatorUtils.readRow(mockResultSet, withHeaders, withEtag, false, infoArray);
 		verify(mockResultSet).getLong(ROW_ID);
 		verify(mockResultSet).getLong(ROW_VERSION);
 		verify(mockResultSet).getString(ROW_ETAG);
+		verify(mockResultSet, never()).getLong(ROW_BENEFACTOR);
 		assertNotNull(result);
 		assertEquals(rowId, result.getRowId());
 		assertEquals(rowVersion, result.getVersionNumber());
@@ -797,7 +868,7 @@ public class SQLTranslatorUtilsTest {
 		assertEquals("aString", result.getValues().get(0));
 		assertEquals(Boolean.TRUE.toString(), result.getValues().get(1));
 	}
-	
+
 	@Test
 	public void testReadWithoutHeadersWithEtagRow() throws SQLException{
 		when(mockResultSet.getString(1)).thenReturn("aString");
@@ -805,10 +876,11 @@ public class SQLTranslatorUtilsTest {
 		boolean withHeaders = false;
 		boolean withEtag = true;
 		// call under test.
-		Row result = SQLTranslatorUtils.readRow(mockResultSet, withHeaders, withEtag, infoArray);
+		Row result = SQLTranslatorUtils.readRow(mockResultSet, withHeaders, withEtag, false, infoArray);
 		verify(mockResultSet, never()).getLong(ROW_ID);
 		verify(mockResultSet, never()).getLong(ROW_VERSION);
 		verify(mockResultSet, never()).getString(ROW_ETAG);
+		verify(mockResultSet, never()).getLong(ROW_BENEFACTOR);
 		assertNotNull(result);
 		assertEquals(null, result.getRowId());
 		assertEquals(null, result.getVersionNumber());
@@ -817,7 +889,7 @@ public class SQLTranslatorUtilsTest {
 		assertEquals("aString", result.getValues().get(0));
 		assertEquals(Boolean.TRUE.toString(), result.getValues().get(1));
 	}
-	
+
 	@Test
 	public void testReadWithoutHeadersWithoutEtagRow() throws SQLException{
 		when(mockResultSet.getString(1)).thenReturn("aString");
@@ -825,10 +897,11 @@ public class SQLTranslatorUtilsTest {
 		boolean withHeaders = false;
 		boolean withEtag = false;
 		// call under test.
-		Row result = SQLTranslatorUtils.readRow(mockResultSet, withHeaders, withEtag, infoArray);
+		Row result = SQLTranslatorUtils.readRow(mockResultSet, withHeaders, withEtag, false, infoArray);
 		verify(mockResultSet, never()).getLong(ROW_ID);
 		verify(mockResultSet, never()).getLong(ROW_VERSION);
 		verify(mockResultSet, never()).getString(ROW_ETAG);
+		verify(mockResultSet, never()).getLong(ROW_BENEFACTOR);
 		assertNotNull(result);
 		assertEquals(null, result.getRowId());
 		assertEquals(null, result.getVersionNumber());
@@ -837,7 +910,7 @@ public class SQLTranslatorUtilsTest {
 		assertEquals("aString", result.getValues().get(0));
 		assertEquals(Boolean.TRUE.toString(), result.getValues().get(1));
 	}
-	
+
 	@Test
 	public void testReadWithHeadersWithoutEtagRow() throws SQLException{
 		when(mockResultSet.getLong(ROW_ID)).thenReturn(rowId);
@@ -847,10 +920,11 @@ public class SQLTranslatorUtilsTest {
 		boolean withHeaders = true;
 		boolean withEtag = false;
 		// call under test.
-		Row result = SQLTranslatorUtils.readRow(mockResultSet, withHeaders, withEtag, infoArray);
+		Row result = SQLTranslatorUtils.readRow(mockResultSet, withHeaders, withEtag, false, infoArray);
 		verify(mockResultSet).getLong(ROW_ID);
 		verify(mockResultSet).getLong(ROW_VERSION);
 		verify(mockResultSet, never()).getString(ROW_ETAG);
+		verify(mockResultSet, never()).getLong(ROW_BENEFACTOR);
 		assertNotNull(result);
 		assertEquals(rowId, result.getRowId());
 		assertEquals(rowVersion, result.getVersionNumber());
@@ -858,6 +932,38 @@ public class SQLTranslatorUtilsTest {
 		assertEquals(2, result.getValues().size());
 		assertEquals("aString", result.getValues().get(0));
 		assertEquals(Boolean.TRUE.toString(), result.getValues().get(1));
+	}
+
+	@Test
+	public void testReadRowWithBenefactorId() throws SQLException {
+		long benefactorId = 99L;
+		when(mockResultSet.getLong(ROW_ID)).thenReturn(rowId);
+		when(mockResultSet.getLong(ROW_VERSION)).thenReturn(rowVersion);
+		when(mockResultSet.getLong(ROW_BENEFACTOR)).thenReturn(benefactorId);
+		when(mockResultSet.getString(1)).thenReturn("aString");
+		when(mockResultSet.getString(2)).thenReturn("true");
+		// call under test
+		Row result = SQLTranslatorUtils.readRow(mockResultSet, true, false, true, infoArray);
+		verify(mockResultSet).getLong(ROW_ID);
+		verify(mockResultSet).getLong(ROW_VERSION);
+		verify(mockResultSet, never()).getString(ROW_ETAG);
+		verify(mockResultSet).getLong(ROW_BENEFACTOR);
+		assertEquals(rowId, result.getRowId());
+		assertEquals(rowVersion, result.getVersionNumber());
+		assertEquals(benefactorId, result.getBenefactorId());
+		assertNull(result.getEtag());
+	}
+
+	@Test
+	public void testReadRowWithoutBenefactorId() throws SQLException {
+		when(mockResultSet.getLong(ROW_ID)).thenReturn(rowId);
+		when(mockResultSet.getLong(ROW_VERSION)).thenReturn(rowVersion);
+		when(mockResultSet.getString(1)).thenReturn("aString");
+		when(mockResultSet.getString(2)).thenReturn("true");
+		// call under test
+		Row result = SQLTranslatorUtils.readRow(mockResultSet, true, false, false, infoArray);
+		verify(mockResultSet, never()).getLong(ROW_BENEFACTOR);
+		assertNull(result.getBenefactorId());
 	}	
 	
 	@Test
@@ -3206,7 +3312,283 @@ public class SQLTranslatorUtilsTest {
 				SQLTranslatorUtils.translateQueryFilters(new StringBuilder(), filter)
 		);
 	}
-	
+
+	/**
+	 * Helper to build a ColumnSingleValueQueryFilter for the filter tests below.
+	 */
+	private static ColumnSingleValueQueryFilter singleValue(String column, ColumnSingleValueFilterOperator operator, String... values) {
+		return new ColumnSingleValueQueryFilter().setColumnName(column).setOperator(operator).setValues(Arrays.asList(values));
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithGreaterThan(){
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, singleValue("age", ColumnSingleValueFilterOperator.GREATER_THAN, "65"));
+		assertEquals("(\"age\" > '65')", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithLessThan(){
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, singleValue("age", ColumnSingleValueFilterOperator.LESS_THAN, "65"));
+		assertEquals("(\"age\" < '65')", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithGreaterThanOrEqual(){
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, singleValue("age", ColumnSingleValueFilterOperator.GREATER_THAN_OR_EQUAL, "65"));
+		assertEquals("(\"age\" >= '65')", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithLessThanOrEqual(){
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, singleValue("age", ColumnSingleValueFilterOperator.LESS_THAN_OR_EQUAL, "65"));
+		assertEquals("(\"age\" <= '65')", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithNotEqual(){
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, singleValue("sex", ColumnSingleValueFilterOperator.NOT_EQUAL, "male"));
+		assertEquals("(\"sex\" <> 'male')", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithGreaterThanAndMultipleValues(){
+		// The relational comparison operators reject multiple values since OR-joining them is meaningless
+		StringBuilder builder = new StringBuilder();
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(builder, singleValue("age", ColumnSingleValueFilterOperator.GREATER_THAN, "18", "65"))
+		);
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithNotEqualAndNoValues(){
+		StringBuilder builder = new StringBuilder();
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(builder, singleValue("sex", ColumnSingleValueFilterOperator.NOT_EQUAL))
+		);
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithIsNull(){
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, singleValue("mid", ColumnSingleValueFilterOperator.IS_NULL));
+		assertEquals("(\"mid\" IS NULL)", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithIsNotNull(){
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, singleValue("mid", ColumnSingleValueFilterOperator.IS_NOT_NULL));
+		assertEquals("(\"mid\" IS NOT NULL)", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithBetween(){
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, singleValue("age", ColumnSingleValueFilterOperator.BETWEEN, "18", "65"));
+		assertEquals("(\"age\" BETWEEN '18' AND '65')", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithIsNullAndNonEmptyValues(){
+		StringBuilder builder = new StringBuilder();
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(builder, singleValue("mid", ColumnSingleValueFilterOperator.IS_NULL, "someValue"))
+		);
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithBetweenAndWrongValueCount(){
+		StringBuilder builder = new StringBuilder();
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(builder, singleValue("age", ColumnSingleValueFilterOperator.BETWEEN, "18"))
+		);
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(builder, singleValue("age", ColumnSingleValueFilterOperator.BETWEEN, "1", "2", "3"))
+		);
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithAndFilterGroup(){
+		FilterGroup group = new FilterGroup().setOperator(BooleanOperator.AND).setChildren(Arrays.asList(
+				singleValue("sex", ColumnSingleValueFilterOperator.EQUAL, "female"),
+				singleValue("age", ColumnSingleValueFilterOperator.GREATER_THAN, "65")));
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, group);
+		assertEquals("((\"sex\" = 'female') AND (\"age\" > '65'))", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithOrFilterGroup(){
+		FilterGroup group = new FilterGroup().setOperator(BooleanOperator.OR).setChildren(Arrays.asList(
+				singleValue("sex", ColumnSingleValueFilterOperator.EQUAL, "female"),
+				singleValue("age", ColumnSingleValueFilterOperator.GREATER_THAN, "65")));
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, group);
+		assertEquals("((\"sex\" = 'female') OR (\"age\" > '65'))", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithNotFilterGroup(){
+		FilterGroup group = new FilterGroup().setOperator(BooleanOperator.AND).setNot(true).setChildren(Arrays.asList(
+				singleValue("study", ColumnSingleValueFilterOperator.EQUAL, "excluded")));
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, group);
+		assertEquals("NOT ((\"study\" = 'excluded'))", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithNestedFilterGroups(){
+		// ((diagnosis LIKE '%Alzheimer%' AND age > 65) OR (diagnosis LIKE '%dementia%'))
+		//   AND NOT (study = 'excluded') AND sex = 'female'   (TDD Cohort Builder 2.0 section 6.3)
+		FilterGroup alzheimerAndAge = new FilterGroup().setOperator(BooleanOperator.AND).setChildren(Arrays.asList(
+				singleValue("diagnosis", ColumnSingleValueFilterOperator.LIKE, "%Alzheimer%"),
+				singleValue("age", ColumnSingleValueFilterOperator.GREATER_THAN, "65")));
+		FilterGroup diagnosisOr = new FilterGroup().setOperator(BooleanOperator.OR).setChildren(Arrays.asList(
+				alzheimerAndAge,
+				singleValue("diagnosis", ColumnSingleValueFilterOperator.LIKE, "%dementia%")));
+		FilterGroup notStudy = new FilterGroup().setOperator(BooleanOperator.AND).setNot(true).setChildren(Arrays.asList(
+				singleValue("study", ColumnSingleValueFilterOperator.EQUAL, "excluded")));
+		FilterGroup root = new FilterGroup().setOperator(BooleanOperator.AND).setChildren(Arrays.asList(
+				diagnosisOr,
+				notStudy,
+				singleValue("sex", ColumnSingleValueFilterOperator.EQUAL, "female")));
+
+		StringBuilder builder = new StringBuilder();
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(builder, root);
+		assertEquals("((((\"diagnosis\" LIKE '%Alzheimer%') AND (\"age\" > '65')) OR (\"diagnosis\" LIKE '%dementia%'))"
+				+ " AND NOT ((\"study\" = 'excluded')) AND (\"sex\" = 'female'))", builder.toString());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithFilterGroupProducesValidSql() throws ParseException {
+		TableExpression tableExpression = new TableQueryParser("from syn1").tableExpression();
+		FilterGroup group = new FilterGroup().setOperator(BooleanOperator.OR).setChildren(Arrays.asList(
+				singleValue("sex", ColumnSingleValueFilterOperator.EQUAL, "female"),
+				singleValue("age", ColumnSingleValueFilterOperator.GREATER_THAN, "65")));
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(tableExpression, Arrays.asList(group));
+		assertEquals("FROM syn1 WHERE ( ( \"age\" > '65' ) OR ( \"sex\" = 'female' ) )", tableExpression.toSql());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithDefiningFilterGroup() throws ParseException {
+		TableExpression tableExpression = new TableQueryParser("from syn1").tableExpression();
+		FilterGroup group = new FilterGroup().setOperator(BooleanOperator.OR).setIsDefiningCondition(true).setChildren(Arrays.asList(
+				singleValue("sex", ColumnSingleValueFilterOperator.EQUAL, "female"),
+				singleValue("age", ColumnSingleValueFilterOperator.GREATER_THAN, "65")));
+		// method under test
+		SQLTranslatorUtils.translateQueryFilters(tableExpression, Arrays.asList(group));
+		assertEquals("FROM syn1 DEFINING_WHERE ( ( \"age\" > '65' ) OR ( \"sex\" = 'female' ) )", tableExpression.toSql());
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithFilterGroupMissingOperator(){
+		FilterGroup group = new FilterGroup().setChildren(Arrays.asList(
+				singleValue("sex", ColumnSingleValueFilterOperator.EQUAL, "female")));
+		StringBuilder builder = new StringBuilder();
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(builder, group)
+		);
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithFilterGroupEmptyChildren(){
+		FilterGroup group = new FilterGroup().setOperator(BooleanOperator.AND).setChildren(Collections.emptyList());
+		StringBuilder builder = new StringBuilder();
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(builder, group)
+		);
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithDepthLimitExceeded() throws ParseException {
+		TableExpression tableExpression = new TableQueryParser("from syn1").tableExpression();
+		QueryFilter current = singleValue("age", ColumnSingleValueFilterOperator.GREATER_THAN, "65");
+		// Wrap into six nested groups: outermost is depth 1, innermost depth 6 (exceeds MAX_FILTER_DEPTH of 5)
+		for (int i = 0; i < SQLTranslatorUtils.MAX_FILTER_DEPTH + 1; i++) {
+			current = new FilterGroup().setOperator(BooleanOperator.AND).setChildren(Arrays.asList(current));
+		}
+		QueryFilter tooDeep = current;
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(tableExpression, Arrays.asList(tooDeep))
+		);
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithChildrenPerGroupLimitExceeded() throws ParseException {
+		TableExpression tableExpression = new TableQueryParser("from syn1").tableExpression();
+		List<QueryFilter> children = new ArrayList<>();
+		for (int i = 0; i < SQLTranslatorUtils.MAX_CHILDREN_PER_GROUP + 1; i++) {
+			children.add(singleValue("age", ColumnSingleValueFilterOperator.EQUAL, "" + i));
+		}
+		FilterGroup group = new FilterGroup().setOperator(BooleanOperator.OR).setChildren(children);
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(tableExpression, Arrays.asList(group))
+		);
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithTopLevelListSizeLimitExceeded() throws ParseException {
+		TableExpression tableExpression = new TableQueryParser("from syn1").tableExpression();
+		List<QueryFilter> filters = new ArrayList<>();
+		for (int i = 0; i < SQLTranslatorUtils.MAX_CHILDREN_PER_GROUP + 1; i++) {
+			filters.add(singleValue("age", ColumnSingleValueFilterOperator.EQUAL, "" + i));
+		}
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(tableExpression, filters)
+		);
+	}
+
+	@Test
+	public void testTranslateQueryFiltersWithLeafPredicateLimitExceeded() throws ParseException {
+		TableExpression tableExpression = new TableQueryParser("from syn1").tableExpression();
+		// Three groups of 25/25/1 leaves = 51 total leaves (exceeds MAX_LEAF_PREDICATES of 50),
+		// while each group stays within MAX_CHILDREN_PER_GROUP
+		List<QueryFilter> topLevel = Arrays.asList(
+				groupOfLeaves(SQLTranslatorUtils.MAX_CHILDREN_PER_GROUP),
+				groupOfLeaves(SQLTranslatorUtils.MAX_CHILDREN_PER_GROUP),
+				groupOfLeaves(1));
+		assertThrows(IllegalArgumentException.class, ()->
+				// method under test
+				SQLTranslatorUtils.translateQueryFilters(tableExpression, topLevel)
+		);
+	}
+
+	private static FilterGroup groupOfLeaves(int leafCount) {
+		List<QueryFilter> children = new ArrayList<>();
+		for (int i = 0; i < leafCount; i++) {
+			children.add(singleValue("age", ColumnSingleValueFilterOperator.EQUAL, "" + i));
+		}
+		return new FilterGroup().setOperator(BooleanOperator.OR).setChildren(children);
+	}
+
 	@Test
 	public void testGetColumnType() throws ParseException {
 		ColumnModel column = schema.get(0);

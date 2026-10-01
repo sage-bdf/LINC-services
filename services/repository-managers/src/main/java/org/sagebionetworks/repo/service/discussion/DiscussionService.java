@@ -16,6 +16,7 @@ import org.sagebionetworks.repo.model.discussion.DiscussionThreadBundle;
 import org.sagebionetworks.repo.model.discussion.DiscussionThreadOrder;
 import org.sagebionetworks.repo.model.discussion.EntityThreadCounts;
 import org.sagebionetworks.repo.model.discussion.Forum;
+import org.sagebionetworks.repo.model.discussion.ForumObjectType;
 import org.sagebionetworks.repo.model.discussion.MessageURL;
 import org.sagebionetworks.repo.model.discussion.ReplyCount;
 import org.sagebionetworks.repo.model.discussion.ThreadCount;
@@ -36,12 +37,17 @@ public interface DiscussionService {
 
 	/**
 	 * get forum metadata for the given ID
-	 * 
+	 *
 	 * @param userId
 	 * @param forumId
 	 * @return
 	 */
 	public Forum getForum(Long userId, String forumId);
+
+	/**
+	 * Get or create forum for the given object.
+	 */
+	public Forum getForumByObjectIdAndType(Long userId, String objectId, ForumObjectType objectType);
 
 	/**
 	 * Create a new thread
@@ -265,4 +271,13 @@ public interface DiscussionService {
 	 * @return
 	 */
 	DiscussionSearchResponse search(Long userId, String forumId, DiscussionSearchRequest request);
+
+	/**
+	 * Get the discussion thread for a given submission.
+	 *
+	 * @param userId
+	 * @param submissionId
+	 * @return
+	 */
+	DiscussionThreadBundle getThreadForSubmission(Long userId, String submissionId);
 }

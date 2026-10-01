@@ -5,11 +5,11 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.PrintStream;
 
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.sagebionetworks.repo.manager.UserCertificationRequiredException;
@@ -40,9 +40,11 @@ import org.sagebionetworks.repo.model.asynch.AsynchronousJobStatus;
 import org.sagebionetworks.repo.model.auth.TwoFactorAuthErrorResponse;
 import org.sagebionetworks.repo.model.drs.DrsErrorResponse;
 import org.sagebionetworks.repo.model.ses.QuarantinedEmailException;
+import org.sagebionetworks.repo.model.table.BelowThresholdErrorResponse;
 import org.sagebionetworks.repo.model.table.TableStatus;
 import org.sagebionetworks.repo.model.table.TableUnavailableException;
 import org.sagebionetworks.repo.queryparser.ParseException;
+import org.sagebionetworks.repo.web.BelowThresholdException;
 import org.sagebionetworks.repo.web.DeprecatedServiceException;
 import org.sagebionetworks.repo.web.FileHandleLinkedException;
 import org.sagebionetworks.repo.web.NotFoundException;
@@ -1103,6 +1105,21 @@ public class BaseControllerExceptionHandlerAdvice {
 	@ExceptionHandler(TwoFactorAuthEnabledRequiredException.class)
 	@ResponseStatus(HttpStatus.UNAUTHORIZED)
 	public @ResponseBody BaseError handleTwoFactorAuthDisabledException(TwoFactorAuthEnabledRequiredException ex, HttpServletRequest request) {
-		return handleException(ex, request, ex.getMessage(), false, ErrorResponseCode.TWO_FA_ENABLED_REQUIRED);	
+		return handleException(ex, request, ex.getMessage(), false, ErrorResponseCode.TWO_FA_ENABLED_REQUIRED);
+	}
+
+	@ExceptionHandler(BelowThresholdException.class)
+	@ResponseStatus(HttpStatus.FORBIDDEN)
+	public @ResponseBody BelowThresholdErrorResponse handleBelowThresholdException(BelowThresholdException ex, HttpServletRequest request) {
+		// Let the existing exception handler deal with logging
+		handleException(ex, request, ex.getMessage(), false, ErrorResponseCode.BELOW_THRESHOLD);
+
+		BelowThresholdErrorResponse errorResponse = new BelowThresholdErrorResponse();
+
+		errorResponse.setSuppressionThreshold(ex.getSuppressionThreshold());
+		errorResponse.setErrorCode(ErrorResponseCode.BELOW_THRESHOLD);
+		errorResponse.setReason(ex.getMessage());
+
+		return errorResponse;
 	}
 }

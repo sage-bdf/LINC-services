@@ -21,7 +21,8 @@ import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_DISCUSSI
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_DISCUSSION_THREAD_VIEW_THREAD_ID;
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_DISCUSSION_THREAD_VIEW_USER_ID;
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_FORUM_ID;
-import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_FORUM_PROJECT_ID;
+import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_FORUM_OBJECT_ID;
+import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.COL_FORUM_OBJECT_TYPE;
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.TABLE_DISCUSSION_THREAD;
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.TABLE_DISCUSSION_THREAD_ENTITY_REFERENCE;
 import static org.sagebionetworks.repo.model.query.jdo.SqlConstants.TABLE_DISCUSSION_THREAD_STATS;
@@ -37,6 +38,7 @@ import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.Optional;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -46,6 +48,8 @@ import org.sagebionetworks.repo.model.dbo.DBOBasicDao;
 import org.sagebionetworks.repo.model.dbo.persistence.discussion.DBODiscussionThread;
 import org.sagebionetworks.repo.model.dbo.persistence.discussion.DiscussionThreadUtils;
 import org.sagebionetworks.repo.model.discussion.DiscussionFilter;
+import org.sagebionetworks.repo.model.discussion.DiscussionThread;
+import org.sagebionetworks.repo.model.discussion.ForumObjectType;
 import org.sagebionetworks.repo.model.discussion.DiscussionThreadBundle;
 import org.sagebionetworks.repo.model.discussion.DiscussionThreadEntityReference;
 import org.sagebionetworks.repo.model.discussion.DiscussionThreadOrder;
@@ -56,23 +60,27 @@ import org.sagebionetworks.repo.model.jdo.KeyFactory;
 import org.sagebionetworks.repo.transactions.WriteTransaction;
 import org.sagebionetworks.repo.web.NotFoundException;
 import org.sagebionetworks.util.ValidateArgument;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.stereotype.Repository;
 
+@Repository
 public class DBODiscussionThreadDAOImpl implements DiscussionThreadDAO {
 
 	public static final String THREAD_DOES_NOT_EXIST = "Thread: '%s' does not exist";
-	@Autowired
-	private JdbcTemplate jdbcTemplate;
-	@Autowired
-	private NamedParameterJdbcTemplate namedTemplate;
-	@Autowired
-	private DBOBasicDao basicDao;
+	private final JdbcTemplate jdbcTemplate;
+	private final NamedParameterJdbcTemplate namedTemplate;
+	private final DBOBasicDao basicDao;
+
+	public DBODiscussionThreadDAOImpl(JdbcTemplate jdbcTemplate, NamedParameterJdbcTemplate namedTemplate, DBOBasicDao basicDao) {
+		this.jdbcTemplate = jdbcTemplate;
+		this.namedTemplate = namedTemplate;
+		this.basicDao = basicDao;
+	}
 
 	public static final Charset UTF8 = Charset.forName("UTF-8");
 	private RowMapper<DiscussionThreadBundle> DISCUSSION_THREAD_BUNDLE_ROW_MAPPER = new RowMapper<DiscussionThreadBundle>(){
@@ -83,7 +91,13 @@ public class DBODiscussionThreadDAOImpl implements DiscussionThreadDAO {
 			DiscussionThreadBundle dto = new DiscussionThreadBundle();
 			dto.setId(Long.toString(rs.getLong(COL_DISCUSSION_THREAD_ID)));
 			dto.setForumId(Long.toString(rs.getLong(COL_DISCUSSION_THREAD_FORUM_ID)));
-			dto.setProjectId(KeyFactory.keyToString(rs.getLong(COL_FORUM_PROJECT_ID)));
+			String objectId = rs.getString(COL_FORUM_OBJECT_ID);
+			String objectType = rs.getString(COL_FORUM_OBJECT_TYPE);
+			dto.setObjectId(objectId);
+			dto.setObjectType(ForumObjectType.valueOf(objectType));
+			if (ForumObjectType.ENTITY == ForumObjectType.valueOf(objectType)) {
+				dto.setProjectId(KeyFactory.keyToString(Long.valueOf(objectId)));
+			}
 			Blob titleBlob = rs.getBlob(COL_DISCUSSION_THREAD_TITLE);
 			dto.setTitle(new String(titleBlob.getBytes(1, (int) titleBlob.length()), UTF8));
 			dto.setCreatedOn(new Date(rs.getTimestamp(COL_DISCUSSION_THREAD_CREATED_ON).getTime()));
@@ -157,13 +171,6 @@ public class DBODiscussionThreadDAOImpl implements DiscussionThreadDAO {
 			+" SET "+COL_DISCUSSION_THREAD_ETAG+" = ?"
 			+" WHERE "+COL_DISCUSSION_THREAD_ID+" = ?";
 
-	private static final String SELECT_PROJECT_ID = "SELECT "
-			+TABLE_FORUM+"."+COL_FORUM_PROJECT_ID
-			+" FROM "+TABLE_DISCUSSION_THREAD+", "+TABLE_FORUM
-			+" WHERE "+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_FORUM_ID
-			+" = "+TABLE_FORUM+"."+COL_FORUM_ID
-			+ " AND "+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_ID+" = ?";
-
 	private static final String SELECT_AUTHOR = "SELECT "+COL_DISCUSSION_THREAD_CREATED_BY
 			+" FROM "+TABLE_DISCUSSION_THREAD
 			+" WHERE "+COL_DISCUSSION_THREAD_ID+" = ?";
@@ -175,7 +182,8 @@ public class DBODiscussionThreadDAOImpl implements DiscussionThreadDAO {
 	private static final String SELECT_THREAD_BUNDLE = "SELECT "
 			+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_ID+" AS "+COL_DISCUSSION_THREAD_ID+", "
 			+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_FORUM_ID+" AS "+COL_DISCUSSION_THREAD_FORUM_ID+", "
-			+TABLE_FORUM+"."+COL_FORUM_PROJECT_ID+" AS "+COL_FORUM_PROJECT_ID+", "
+			+TABLE_FORUM+"."+COL_FORUM_OBJECT_ID+" AS "+COL_FORUM_OBJECT_ID+", "
+			+TABLE_FORUM+"."+COL_FORUM_OBJECT_TYPE+" AS "+COL_FORUM_OBJECT_TYPE+", "
 			+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_TITLE+" AS "+COL_DISCUSSION_THREAD_TITLE+", "
 			+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_CREATED_ON+" AS "+COL_DISCUSSION_THREAD_CREATED_ON+", "
 			+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_CREATED_BY+" AS "+COL_DISCUSSION_THREAD_CREATED_BY+", "
@@ -226,7 +234,7 @@ public class DBODiscussionThreadDAOImpl implements DiscussionThreadDAO {
 			+" AND "+TABLE_DISCUSSION_THREAD+"."+COL_DISCUSSION_THREAD_FORUM_ID
 					+" = "+TABLE_FORUM+"."+COL_FORUM_ID;
 	public static final String ENTITY_ID_CONDITION = COL_DISCUSSION_THREAD_ENTITY_REFERENCE_ENTITY_ID+" = :"+ID;
-	public static final String PROJECT_CONDITION = COL_FORUM_PROJECT_ID+" IN (:"+PROJECT_IDS+")";
+	public static final String PROJECT_CONDITION = COL_FORUM_OBJECT_ID+" IN (:"+PROJECT_IDS+")";
 	public static final String ENTITY_LIST_CONDITION = COL_DISCUSSION_THREAD_ENTITY_REFERENCE_ENTITY_ID+" IN (:"+ENTITY_IDS+")";
 
 	// Count the unique threads that mentioned the given entity and belong to a project in the given list
@@ -263,7 +271,7 @@ public class DBODiscussionThreadDAOImpl implements DiscussionThreadDAO {
 			+" GROUP BY "+COL_DISCUSSION_THREAD_ENTITY_REFERENCE_ENTITY_ID;
 
 	// Get a list of project that contains threads that mentioned an entity in the given list
-	public static final String SQL_GET_PROJECTS = "SELECT DISTINCT "+COL_FORUM_PROJECT_ID
+	public static final String SQL_GET_PROJECTS = "SELECT DISTINCT "+COL_FORUM_OBJECT_ID
 			+FORUM_THREAD_ENTITY_REF_JOIN
 			+" AND "+ENTITY_LIST_CONDITION;
 
@@ -319,6 +327,27 @@ public class DBODiscussionThreadDAOImpl implements DiscussionThreadDAO {
 			throw new NotFoundException(String.format(THREAD_DOES_NOT_EXIST, threadId));
 		}
 		return results.get(0);
+	}
+
+	@Override
+	public Optional<DiscussionThread> getDiscussionThread(long threadId) {
+		try {
+			return Optional.ofNullable(jdbcTemplate.queryForObject(
+					"SELECT T.ID, T.FORUM_ID, F.OBJECT_ID, F.OBJECT_TYPE"
+							+ " FROM DISCUSSION_THREAD T"
+							+ " JOIN FORUM F ON T.FORUM_ID = F.ID"
+							+ " WHERE T.ID = ?",
+					(rs, rowNum) -> {
+						DiscussionThread dt = new DiscussionThread();
+						dt.setId(Long.toString(rs.getLong("ID")));
+						dt.setForumId(Long.toString(rs.getLong("FORUM_ID")));
+						dt.setObjectId(Long.toString(rs.getLong("OBJECT_ID")));
+						dt.setObjectType(ForumObjectType.valueOf(rs.getString("OBJECT_TYPE")));
+						return dt;
+					}, threadId));
+		} catch (EmptyResultDataAccessException e) {
+			return Optional.empty();
+		}
 	}
 
 	@WriteTransaction
@@ -477,20 +506,6 @@ public class DBODiscussionThreadDAOImpl implements DiscussionThreadDAO {
 	}
 
 	@Override
-	public String getProjectId(String threadId) {
-		List<String> queryResult = jdbcTemplate.query(SELECT_PROJECT_ID, new RowMapper<String>(){
-			@Override
-			public String mapRow(ResultSet rs, int rowNum) throws SQLException {
-				return KeyFactory.keyToString(rs.getLong(COL_FORUM_PROJECT_ID));
-			}
-		}, threadId);
-		if (queryResult.size() != 1) {
-			throw new NotFoundException(String.format(THREAD_DOES_NOT_EXIST, threadId));
-		}
-		return queryResult.get(0);
-	}
-
-	@Override
 	public String getAuthorForUpdate(String threadId) {
 		String query = addCondition(SELECT_AUTHOR, DiscussionFilter.EXCLUDE_DELETED);
 		List<String> queryResult = jdbcTemplate.query(query, new RowMapper<String>(){
@@ -566,6 +581,43 @@ public class DBODiscussionThreadDAOImpl implements DiscussionThreadDAO {
 		});
 	}
 
+	@WriteTransaction
+	@Override
+	public void insertSubmissionReference(String threadId, String submissionId) {
+		ValidateArgument.required(threadId, "threadId");
+		ValidateArgument.required(submissionId, "submissionId");
+		jdbcTemplate.update(
+				"INSERT INTO DISCUSSION_THREAD_SUBMISSION_REFERENCE (THREAD_ID, SUBMISSION_ID) VALUES (?, ?)",
+				Long.parseLong(threadId), Long.parseLong(submissionId));
+	}
+
+	@Override
+	public Optional<DiscussionThreadBundle> getThreadForSubmission(String submissionId) {
+		ValidateArgument.required(submissionId, "submissionId");
+		try {
+			return Optional.ofNullable(jdbcTemplate.queryForObject(
+					SELECT_THREAD_BUNDLE
+							+ " JOIN DISCUSSION_THREAD_SUBMISSION_REFERENCE R"
+							+ " ON R.THREAD_ID = DISCUSSION_THREAD.ID"
+							+ " WHERE R.SUBMISSION_ID = ?",
+					DISCUSSION_THREAD_BUNDLE_ROW_MAPPER, Long.parseLong(submissionId)));
+		} catch (EmptyResultDataAccessException e) {
+			return Optional.empty();
+		}
+	}
+
+	@Override
+	public Optional<String> getSubmissionIdForThread(String threadId) {
+		ValidateArgument.required(threadId, "threadId");
+		try {
+			return Optional.of(jdbcTemplate.queryForObject(
+					"SELECT SUBMISSION_ID FROM DISCUSSION_THREAD_SUBMISSION_REFERENCE WHERE THREAD_ID = ?",
+					String.class, Long.parseLong(threadId)));
+		} catch (EmptyResultDataAccessException e) {
+			return Optional.empty();
+		}
+	}
+
 	@Override
 	public EntityThreadCounts getThreadCounts(List<Long> entityIds, Set<Long> projectIds) {
 		ValidateArgument.required(entityIds, "entityIds");
@@ -602,7 +654,7 @@ public class DBODiscussionThreadDAOImpl implements DiscussionThreadDAO {
 		namedTemplate.query(SQL_GET_PROJECTS, parameters, new RowMapper<Void>(){
 			@Override
 			public Void mapRow(ResultSet rs, int rowNum) throws SQLException {
-				result.add(rs.getLong(COL_FORUM_PROJECT_ID));
+				result.add(rs.getLong(COL_FORUM_OBJECT_ID));
 				return null;
 			}
 		});

@@ -2,6 +2,23 @@
 
 Async worker WAR — all background processing in Synapse. Workers consume SQS messages or run on fixed schedules via Quartz, coordinated by database semaphores for cluster-wide concurrency control.
 
+## Async Job Framework
+
+User-facing operations that are too slow for synchronous HTTP use the async job framework:
+1. Client submits a request object (extends `AsynchronousRequestBody`) via a start endpoint
+2. Request is serialized to an SQS queue
+3. A worker implementing `AsyncJobRunner<Request, Response>` picks up the message, executes the work, and returns a response object (extends `AsynchronousResponseBody`)
+4. Client polls a get endpoint with the async token until the result is ready
+
+Key classes:
+- `AsyncJobRunner<R, T>` — worker interface (`lib/lib-worker/`). Implement `getRequestType()`, `getResponseType()`, and `run()`.
+- `AsynchJobType` — enum mapping request/response types to queue names (`lib/models/`). New async jobs must be registered here.
+- `SynapseClient` / `SynapseClientImpl` — add client methods for submitting and polling async jobs (`client/synapseJavaClient/`)
+
+### SQS Queue Infrastructure
+
+Queue names are resolved at runtime via `stackConfig.getQueueName("BASE_NAME")` → `{stack}-{instance}-BASE_NAME`. The actual SQS queues and SNS topic subscriptions are provisioned by **Synapse-Stack-Builder** (a separate CloudFormation project). New queues must be added to the Stack Builder's `sns-and-sqs-config.json` before they can be used. If a queue doesn't exist in AWS, the worker will fail to get the queue URL at runtime.
+
 ## Two Worker Types
 
 ### 1. Message-Driven Workers (event-driven)
@@ -112,6 +129,14 @@ return new WorkerTriggerBuilder()
 - `canRunInReadOnly` — whether worker runs during migration read-only mode
 - `queueName` — SQS queue name via `stackConfig.getQueueName("QUEUE_KEY")`
 
+### Two-Step Registration (Critical)
+
+Creating a worker `@Bean` trigger in Java config is **not enough**. Workers require two registrations:
+
+1. **Define the trigger bean** in a `@Configuration` class (see Config Classes above) using `WorkerTriggerBuilder` + `ConcurrentWorkerStack.builder()`.
+
+2. **Register the trigger in the Quartz scheduler** by adding a `<ref bean="...Trigger"/>` entry to the `workerTriggersList` in `services/workers/src/main/resources/main-scheduler-spb.xml`. **If this step is missed, the worker will never run** — the bean exists but Quartz never schedules it. There will be no error at startup; the worker silently does nothing.
+
 ### Legacy XML Config (do not add new ones)
 
 Some older workers are still wired in per-worker `*-spb.xml` files under `src/main/resources/`, imported by `main-scheduler-spb.xml`. Migrate these to `@Configuration` classes when modifying them.
@@ -133,6 +158,8 @@ Common transient exceptions to catch and retry:
 - `AmazonServiceException` (service errors)
 - `TemporarilyUnavailableException`
 
+**Worker-specific exception semantics matter.** In `SearchIndexLifecycleWorker`, a `NotFoundException` on the source entity means "entity is gone → clean up its index" (falls back to the delete path), NOT a generic permanent failure — preserve that fallback when editing the exception cascade.
+
 ## Worker Categories
 
 | Package | Type | Description |
@@ -141,12 +168,14 @@ Common transient exceptions to catch and retry:
 | `table/` | Message-driven | Table index management, materialized view updates |
 | `replication/` | Batch message | Entity replication to index database |
 | `file/` | Message-driven | File preview generation |
-| `search/` | Message-driven | Search index (OpenSearch) updates |
+| `search/oss/worker/` | Message-driven | Legacy OpenSearch index writer (`SearchIndexWorker`, queue-driven) |
+| `search/workers/` | Mixed | `SearchIndexLifecycleWorker` (change-message-driven, builds/deletes managed-domain SearchIndex) + `SearchQueryWorker` (`AsyncJobRunner`) |
+| `recordset/worker/` | Message-driven | `RecordSetIndexWorker` — builds the queryable index for a RecordSet version |
 | `schema/` | Message-driven | JSON Schema validation |
 | `migration/` | Batch message | Data migration workers |
 | `log/` | Scheduled | S3 log collation |
 | `agent/` | Message-driven | AI agent chat processing |
-| `grid/` | Message-driven | Grid CRDT patch processing, validation |
+| `grid/` | Mixed | Grid CRDT patch processing + validation (message-driven) plus `GridQueryWorker`/`GridUpdateWorker` (`AsyncJobRunner`) |
 
 ## Key Architectural Worker: ChangeSentMessageSynchWorker
 
@@ -167,7 +196,7 @@ This worker drives index rebuilding after migration:
 
 ## Testing
 
-- JUnit 5 + Mockito 2.27 (`@ExtendWith(MockitoExtension.class)`)
+- JUnit 5 + Mockito 5.x (`@ExtendWith(MockitoExtension.class)`)
 - Mock managers/DAOs, verify expected calls
 - Test both success paths and error handling (RecoverableMessageException vs permanent failure)
 - Test ObjectType/ChangeType filtering logic

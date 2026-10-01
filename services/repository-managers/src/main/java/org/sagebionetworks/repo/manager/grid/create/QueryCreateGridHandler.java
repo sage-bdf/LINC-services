@@ -1,10 +1,13 @@
 package org.sagebionetworks.repo.manager.grid.create;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.sagebionetworks.repo.manager.EntityManager;
@@ -12,8 +15,8 @@ import org.sagebionetworks.repo.manager.grid.GridAuthorizationManager;
 import org.sagebionetworks.repo.manager.grid.IndexedModelEncoderProvider;
 import org.sagebionetworks.repo.manager.grid.SnapshotRowHandler;
 import org.sagebionetworks.repo.manager.grid.SnapshotStore;
-import org.sagebionetworks.repo.manager.schema.JsonSchemaManager;
-import org.sagebionetworks.repo.manager.schema.JsonSchemaValidationManager;
+import org.sagebionetworks.repo.manager.grid.internal.replica.GridReplicaConnectionManager;
+import org.sagebionetworks.repo.manager.grid.internal.replica.validation.GridRowValidator;
 import org.sagebionetworks.repo.manager.table.TableQueryManager;
 import org.sagebionetworks.repo.model.ACCESS_TYPE;
 import org.sagebionetworks.repo.model.EntityType;
@@ -48,25 +51,26 @@ public class QueryCreateGridHandler implements CreateGridHandler {
 	private final GridDao gridDao;
 	private final TableQueryManager tableQueryManager;
 	private final EntityManager entityManager;
-	private final JsonSchemaManager schemaManager;
-	private final JsonSchemaValidationManager jsonSchemaValidationManager;
+	private final GridRowValidator gridRowValidator;
 	private final GridAuthorizationManager gridAuthorizationManager;
 	private final FileProvider fileProvider;
 	private final IndexedModelEncoderProvider encoderProvider;
+	private final GridReplicaConnectionManager gridReplicaConnectionManager;
 
 	public QueryCreateGridHandler(GridDao gridDao, EntityManager entityManager, TableQueryManager tableQueryManager,
-								  JsonSchemaManager schemaManager, JsonSchemaValidationManager jsonSchemaValidationManager,
+								  GridRowValidator gridRowValidator,
 								  GridAuthorizationManager gridAuthorizationManager, FileProvider fileProvider,
-								  IndexedModelEncoderProvider encoderProvider) {
+								  IndexedModelEncoderProvider encoderProvider,
+								  GridReplicaConnectionManager gridReplicaConnectionManager) {
 		super();
 		this.gridDao = gridDao;
 		this.entityManager = entityManager;
 		this.tableQueryManager = tableQueryManager;
-		this.schemaManager = schemaManager;
-		this.jsonSchemaValidationManager = jsonSchemaValidationManager;
+		this.gridRowValidator = gridRowValidator;
 		this.gridAuthorizationManager = gridAuthorizationManager;
 		this.fileProvider = fileProvider;
 		this.encoderProvider = encoderProvider;
+		this.gridReplicaConnectionManager = gridReplicaConnectionManager;
 	}
 
 	@Override
@@ -93,8 +97,9 @@ public class QueryCreateGridHandler implements CreateGridHandler {
 			Long maxRowSizeBytes = getMaxRowSizeBytes(pre.getMaxRowsPerPage());
 
 			GridSession session = gridDao.createGridSession(new CreateGridSession().setUserId(user.getId())
-					.setSourceId(tableId).setSchemaId(schemaIdOp.orElse(null)).setOwner(request.getOwnerPrincipalId()));
-			GridReplica replica = gridDao.createReplica(user.getId(), session.getSessionId(), false,
+					.setSourceId(tableId).setSchemaId(schemaIdOp.orElse(null)).setOwner(request.getOwnerPrincipalId())
+					.setAuthorizationMode(request.getAuthorizationMode()));
+			GridReplica replica = gridReplicaConnectionManager.createReplicaAndConnect(user.getId(), session.getSessionId(), false,
 					EventSource.INTERNAL);
 
 			// Always include the entity etag so it is included in the grid metadata. The
@@ -102,7 +107,7 @@ public class QueryCreateGridHandler implements CreateGridHandler {
 			// grid data back into a Synapse Table or View
 			initialQuery.setIncludeEntityEtag(true);
 
-			final Optional<JsonSchema> validationSchema = schemaIdOp.map(schemaManager::getValidationSchema);
+			final Optional<JsonSchema> validationSchema = schemaIdOp.map(gridRowValidator::getValidationSchema);
 
 			final List<String> columnsRequiredBySchema = validationSchema
 					.map(JsonSchema::getRequired)
@@ -118,24 +123,48 @@ public class QueryCreateGridHandler implements CreateGridHandler {
 					.map(cm -> columnNameToIndex.get(cm.getName()))
 					.collect(Collectors.toList());
 			
-			// ensure only rows are added that the owner can see.
-			UserInfo sessionOwner = gridAuthorizationManager.getRowLevelFilterUserInfo(user, session.getSessionId());
+			// ensure only rows are added that the filter user can see.
+			UserInfo filterUser = gridAuthorizationManager.getRowLevelFilterUserInfo(user, session.getSessionId());
 
-			// The second query is a full query to build all of the patches from the query
-			// results.
-			tableQueryManager.runQueryAsStream(callback, sessionOwner, initialQuery, t -> {
+			Set<Long> collectedBenefactorIds = new HashSet<>();
+
+			// The second query is a full query to build all of the patches from the query results.
+			tableQueryManager.runQueryAsStream(callback, filterUser, initialQuery, t -> {
 				List<ColumnModel> schema = t.getMainQuery().getTranslator().getSchemaOfSelect();
-				return new SnapshotRowHandler(snapshotStore, session.getSessionId(), replica.getReplicaId(), schema,
-						columnsRequiredBySchemaIndices, fileProvider, encoderProvider, user.getId(),
-						jsonSchemaValidationManager, validationSchema.orElse(null));
+				return getBenefactorCollectingRowHandler(snapshotStore, session, replica, schema,
+						columnsRequiredBySchemaIndices, user.getId(), schemaIdOp, collectedBenefactorIds);
 			}, ACCESS_TYPE.READ, ACCESS_TYPE.UPDATE);
-			return new CreateGridHandlerResult().setGridSession(session).setGridReplica(replica);
+
+			EntityType sourceType = entityManager.getEntityType(tableId);
+			final Set<Long> benefactorIds;
+			if (EntityType.entityview.equals(sourceType)) {
+				benefactorIds = collectedBenefactorIds;
+			} else if (EntityType.table.equals(sourceType)) {
+				// For table sources, checkSourceAccess() already enforces READ+DOWNLOAD+UPDATE
+				// on the source entity (and its benefactor), so no explicit benefactor IDs are needed.
+				benefactorIds = Collections.emptySet();
+			} else {
+				throw new IllegalArgumentException("Unsupported source entity type for grid creation: " + sourceType);
+			}
+
+			return new CreateGridHandlerResult().setGridSession(session).setGridReplica(replica)
+					.setBenefactorIds(benefactorIds);
 		} catch (LockUnavilableException | TableUnavailableException e) {
 			callback.updateProgress("Waiting for table/view to become available...", 1L, 100L);
 			throw new RecoverableMessageException(e);
 		} catch (Exception e) {
 			throw new RuntimeException(e);
 		}
+	}
+
+	BenefactorCollectingRowHandler getBenefactorCollectingRowHandler(SnapshotStore snapshotStore,
+			GridSession session, GridReplica replica, List<ColumnModel> schema,
+			List<Integer> columnsRequiredBySchemaIndices, Long userId,
+			Optional<String> schemaId, Set<Long> collectedBenefactorIds) {
+		SnapshotRowHandler snapshotHandler = new SnapshotRowHandler(snapshotStore, session.getSessionId(),
+				replica.getReplicaId(), schema, columnsRequiredBySchemaIndices, fileProvider, encoderProvider,
+				userId, gridRowValidator, schemaId.orElse(null));
+		return new BenefactorCollectingRowHandler(snapshotHandler, collectedBenefactorIds);
 	}
 
 	Optional<String> getSchemaId(UserInfo user, String tableId, List<Row> rows) {

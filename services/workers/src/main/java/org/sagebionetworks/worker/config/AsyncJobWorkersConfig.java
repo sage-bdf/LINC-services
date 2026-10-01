@@ -2,6 +2,7 @@ package org.sagebionetworks.worker.config;
 
 import org.sagebionetworks.StackConfiguration;
 import org.sagebionetworks.agent.worker.AgentChatWorker;
+import org.sagebionetworks.curation.worker.ComputeTaskExecutionWorker;
 import org.sagebionetworks.asynchronous.workers.concurrent.ConcurrentManager;
 import org.sagebionetworks.asynchronous.workers.concurrent.ConcurrentWorkerStack;
 import org.sagebionetworks.database.semaphore.CountingSemaphore;
@@ -19,13 +20,16 @@ import org.sagebionetworks.grid.workers.GridCSVDownloadWorker;
 import org.sagebionetworks.grid.workers.GridCreateWorker;
 import org.sagebionetworks.grid.workers.GridCsvImportWorker;
 import org.sagebionetworks.grid.workers.GridRecordSetExportWorker;
+import org.sagebionetworks.grid.workers.GridQueryWorker;
 import org.sagebionetworks.grid.workers.GridSynchronizationWorker;
+import org.sagebionetworks.grid.workers.GridUpdateWorker;
 import org.sagebionetworks.migration.worker.MigrationWorker;
 import org.sagebionetworks.repo.manager.UserManager;
 import org.sagebionetworks.repo.manager.asynch.AsynchJobStatusManager;
 import org.sagebionetworks.report.worker.StorageReportCSVDownloadWorker;
 import org.sagebionetworks.schema.worker.CreateJsonSchemaWorker;
 import org.sagebionetworks.schema.worker.GetValidationSchemaWorker;
+import org.sagebionetworks.search.workers.SearchQueryWorker;
 import org.sagebionetworks.table.worker.PFBDownloadWorker;
 import org.sagebionetworks.table.worker.TableCSVAppenderPreviewWorker;
 import org.sagebionetworks.table.worker.TableCSVDownloadWorker;
@@ -710,5 +714,91 @@ public class AsyncJobWorkersConfig {
 		MessageDrivenWorkerStack stack = new MessageDrivenWorkerStack(countingSemaphore, amazonSQSClient, config);
 
 		return new WorkerTriggerBuilder().withStack(stack).withRepeatInterval(1134).withStartDelay(131).build();
+	}
+
+	@Bean
+	public SimpleTriggerFactoryBean gridQueryWorkerTrigger(GridQueryWorker gridQueryWorker) {
+
+		String queueName = stackConfig.getQueueName("GRID_QUERY.fifo");
+		MessageDrivenRunner worker = new AsyncJobRunnerAdapter<>(jobStatusManager, userManager, gridQueryWorker);
+
+		MessageDrivenWorkerStackConfiguration config = new MessageDrivenWorkerStackConfiguration();
+
+		config.setGate(stackStatusGate);
+		config.setQueueName(queueName);
+		config.setRunner(worker);
+		config.setSemaphoreLockAndMessageVisibilityTimeoutSec(60);
+		config.setSemaphoreMaxLockCount(8);
+		config.setSemaphoreLockKey("gridQueryWorker");
+
+		MessageDrivenWorkerStack stack = new MessageDrivenWorkerStack(countingSemaphore, amazonSQSClient, config);
+
+		return new WorkerTriggerBuilder().withStack(stack).withRepeatInterval(1057).withStartDelay(443).build();
+	}
+
+	@Bean
+	public SimpleTriggerFactoryBean gridUpdateWorkerTrigger(GridUpdateWorker gridUpdateWorker) {
+
+		String queueName = stackConfig.getQueueName("GRID_UPDATE.fifo");
+		MessageDrivenRunner worker = new AsyncJobRunnerAdapter<>(jobStatusManager, userManager, gridUpdateWorker);
+
+		MessageDrivenWorkerStackConfiguration config = new MessageDrivenWorkerStackConfiguration();
+
+		config.setGate(stackStatusGate);
+		config.setQueueName(queueName);
+		config.setRunner(worker);
+		config.setSemaphoreLockAndMessageVisibilityTimeoutSec(60);
+		config.setSemaphoreMaxLockCount(4);
+		config.setSemaphoreLockKey("gridUpdateWorker");
+
+		MessageDrivenWorkerStack stack = new MessageDrivenWorkerStack(countingSemaphore, amazonSQSClient, config);
+
+		return new WorkerTriggerBuilder().withStack(stack).withRepeatInterval(1213).withStartDelay(577).build();
+	}
+
+	@Bean
+	public SimpleTriggerFactoryBean searchQueryWorkerTrigger(ConcurrentManager concurrentStackManager, SearchQueryWorker searchQueryWorker) {
+
+		String queueName = stackConfig.getQueueName("SEARCH_QUERY");
+		MessageDrivenRunner worker = new AsyncJobRunnerAdapter<>(jobStatusManager, userManager, searchQueryWorker);
+
+		return new WorkerTriggerBuilder()
+				.withStack(ConcurrentWorkerStack.builder()
+						.withSemaphoreLockKey("searchQueryWorker")
+						.withSemaphoreMaxLockCount(4)
+						.withSemaphoreLockAndMessageVisibilityTimeoutSec(120)
+						.withMaxThreadsPerMachine(3)
+						.withSingleton(concurrentStackManager)
+						.withCanRunInReadOnly(false)
+						.withQueueName(queueName)
+						.withWorker(worker)
+						.build()
+				)
+				.withRepeatInterval(2039)
+				.withStartDelay(317)
+				.build();
+	}
+
+	@Bean
+	public SimpleTriggerFactoryBean computeTaskExecutionTrigger(ConcurrentManager concurrentStackManager, ComputeTaskExecutionWorker computeTaskExecutionWorker) {
+
+		String queueName = stackConfig.getQueueName("COMPUTE_TASK_EXECUTION");
+		MessageDrivenRunner worker = new AsyncJobRunnerAdapter<>(jobStatusManager, userManager, computeTaskExecutionWorker);
+
+		return new WorkerTriggerBuilder()
+				.withStack(ConcurrentWorkerStack.builder()
+						.withSemaphoreLockKey("computeTaskExecutionWorker")
+						.withSemaphoreMaxLockCount(5)
+						.withSemaphoreLockAndMessageVisibilityTimeoutSec(600)
+						.withMaxThreadsPerMachine(2)
+						.withSingleton(concurrentStackManager)
+						.withCanRunInReadOnly(false)
+						.withQueueName(queueName)
+						.withWorker(worker)
+						.build()
+				)
+				.withRepeatInterval(2143)
+				.withStartDelay(1573)
+				.build();
 	}
 }

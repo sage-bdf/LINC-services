@@ -1,90 +1,61 @@
 {
-	"description": "A structured search query against an OpenSearch index. Can be submitted as an asynchronous job.",
-	"implements": [
-		{
-			"$ref": "org.sagebionetworks.repo.model.asynch.AsynchronousRequestBody"
-		}
-	],
+	"description": "<p>The body of an OpenSearch <a href=\"https://docs.opensearch.org/latest/api-reference/search-apis/search/\"><code>_search</code></a> request, narrowed to the top-level keys Synapse accepts. Each slot's contents are pass-through <a href=\"https://docs.opensearch.org/latest/query-dsl/\">OpenSearch query DSL</a>; see the search REST endpoint for the inner-clause allowlist, field-reference rules, pagination semantics, and per-request limits.</p>",
 	"properties": {
-		"queryType": {
-			"description": "Full-text query type. Default: SIMPLE_QUERY_STRING.",
-			"$ref": "org.sagebionetworks.repo.model.search.SearchQueryType"
+		"query": {
+			"$ref": "org.sagebionetworks.repo.model.search.dsl.Query",
+			"description": "<p>Required. The <a href=\"https://docs.opensearch.org/latest/query-dsl/\">OpenSearch query DSL</a> clause. Use <a href=\"https://docs.opensearch.org/latest/query-dsl/match-all/\"><code>{\"match_all\":{}}</code></a> to match all documents. See <a href=\"${org.sagebionetworks.repo.model.search.dsl.Query}\">Query</a> for the full set of supported clause kinds, and <a href=\"https://docs.opensearch.org/latest/query-dsl/query-filter-context/\">query vs. filter context</a>.</p>"
 		},
-		"queryText": {
-			"type": "string",
-			"description": "The search text. Null or empty matches all documents."
+		"post_filter": {
+			"$ref": "org.sagebionetworks.repo.model.search.dsl.Query",
+			"description": "Optional. Same DSL shape as <code>query</code> (see <a href=\"${org.sagebionetworks.repo.model.search.dsl.Query}\">Query</a>), applied <i>after</i> aggregations are computed. For the distinction between filtering hits and filtering aggregations, see <a href=\"https://docs.opensearch.org/latest/query-dsl/query-filter-context/\">query vs. filter context</a>."
 		},
-		"queryFields": {
-			"type": "array",
-			"description": "Column names with optional boost (e.g., 'studyName^3'). Empty means all indexed fields.",
-			"items": {
+		"aggregations": {
+			"type": "map",
+			"key": {
 				"type": "string"
-			}
+			},
+			"value": {
+				"$ref": "org.sagebionetworks.repo.model.search.dsl.Aggregation"
+			},
+			"description": "<p>Optional. Map of caller-chosen name to <a href=\"${org.sagebionetworks.repo.model.search.dsl.Aggregation}\">aggregation</a> definition. The raw aggregation result comes back on <code>SearchQueryResults.aggregationResults</code>. For the facet-counting pattern (a <code>terms</code> aggregation alongside <code>post_filter</code>), see the <a href=\"https://docs.opensearch.org/latest/tutorials/faceted-search/#maintaining-facet-options-during-filtering\">faceted search tutorial</a>.</p>"
 		},
-		"termsFilters": {
-			"type": "array",
-			"description": "Multi-value filters (IN clause).",
-			"items": {
-				"$ref": "org.sagebionetworks.repo.model.search.KeyValues"
-			}
+		"highlight": {
+			"$ref": "org.sagebionetworks.repo.model.search.dsl.Highlight",
+			"description": "Optional. Adds per-field <a href=\"https://docs.opensearch.org/latest/search-plugins/searching-data/highlight/\">snippet fragments</a> (matched terms wrapped in <code>&lt;em&gt;</code> / <code>&lt;/em&gt;</code> tags by default) to each <code>SearchQueryResults.hits[*].highlights</code> entry."
 		},
-		"rangeFilters": {
-			"type": "array",
-			"description": "Range filters with min and max.",
-			"items": {
-				"$ref": "org.sagebionetworks.repo.model.search.KeyRange"
-			}
+		"collapse": {
+			"$ref": "org.sagebionetworks.repo.model.search.dsl.FieldCollapse",
+			"description": "Optional. <a href=\"https://docs.opensearch.org/latest/search-plugins/searching-data/collapse-search/\">Groups the result list</a> so only one hit is returned per distinct value of <code>field</code>."
 		},
-		"existsFilters": {
-			"type": "array",
-			"description": "Columns that must have a non-null value.",
-			"items": {
-				"type": "string"
-			}
-		},
-		"notExistsFilters": {
-			"type": "array",
-			"description": "Columns that must be null or missing.",
-			"items": {
-				"type": "string"
-			}
-		},
-		"fuzziness": {
-			"type": "string",
-			"description": "Typo tolerance: 'AUTO', '0', '1', or '2'."
-		},
-		"facetRequests": {
-			"type": "array",
-			"description": "Columns to aggregate as facets.",
-			"items": {
-				"$ref": "org.sagebionetworks.repo.model.search.FacetRequest"
-			}
-		},
-		"returnFields": {
-			"type": "array",
-			"description": "Columns to include in results. Empty means all columns.",
-			"items": {
-				"type": "string"
-			}
+		"rescore": {
+			"$ref": "org.sagebionetworks.repo.model.search.dsl.Rescore",
+			"description": "Optional. <a href=\"https://docs.opensearch.org/latest/query-dsl/rescore/\">Re-ranks</a> the top <code>window_size</code> hits returned by <code>query</code> using a secondary scoring query."
 		},
 		"sort": {
 			"type": "array",
-			"description": "Sort order. Default: relevance descending.",
+			"description": "Optional. Result <a href=\"https://docs.opensearch.org/latest/search-plugins/searching-data/sort/\">ordering</a>, in native OpenSearch sort shape (a string column name, <code>{column: \"asc|desc\"}</code>, or <code>{column: {order: ..., mode: ..., missing: ...}}</code>) applied in order. Only the <code>field</code> and <code>_score</code> sort kinds are accepted &mdash; script and geo-distance sorts are rejected server-side. The pseudo-column <code>_score</code> sorts by relevance. When omitted, results are sorted by relevance descending. Ties are broken by row ID ascending, except when <code>rescore</code> is supplied.",
 			"items": {
-				"$ref": "org.sagebionetworks.repo.model.search.SortField"
+				"type": "object"
 			}
 		},
-		"highlight": {
-			"type": "boolean",
-			"description": "Whether to return highlighted snippets. Default: false."
+		"_source": {
+			"$ref": "org.sagebionetworks.repo.model.search.dsl.SourceFilter",
+			"description": "Optional. <a href=\"https://docs.opensearch.org/latest/search-plugins/searching-data/retrieve-specific-fields/\">Source filter</a> selecting which columns are returned on each hit."
 		},
-		"offset": {
+		"from": {
 			"type": "integer",
-			"description": "Zero-based pagination offset. Default: 0."
+			"description": "Optional. Zero-based <a href=\"https://docs.opensearch.org/latest/search-plugins/searching-data/paginate/\">pagination</a> offset; default <code>0</code>. Ignored when <code>search_after</code> is supplied (the cursor determines the page start)."
 		},
-		"limit": {
+		"size": {
 			"type": "integer",
-			"description": "Results per page. Default: 25. Max: 100."
+			"description": "Optional. Maximum number of hits to return per <a href=\"https://docs.opensearch.org/latest/search-plugins/searching-data/paginate/\">page</a>. Default: 25. Maximum: 100 (larger values are silently capped)."
+		},
+		"search_after": {
+			"type": "array",
+			"description": "Optional. Opaque <a href=\"https://docs.opensearch.org/latest/search-plugins/searching-data/paginate/\">cursor</a> emitted as <code>nextSearchAfter</code> on the previous response. Pass back unchanged. When supplied, <code>from</code> is ignored.",
+			"items": {
+				"type": "object"
+			}
 		}
 	}
 }

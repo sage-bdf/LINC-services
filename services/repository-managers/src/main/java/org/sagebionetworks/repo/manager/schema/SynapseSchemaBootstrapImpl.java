@@ -25,15 +25,18 @@ import org.sagebionetworks.repo.model.table.MaterializedView;
 import org.sagebionetworks.repo.model.table.SubmissionView;
 import org.sagebionetworks.repo.model.table.TableEntity;
 import org.sagebionetworks.repo.model.table.VirtualTable;
+import org.sagebionetworks.repo.model.search.table.SearchIndex;
 import org.sagebionetworks.repo.transactions.WriteTransaction;
 import org.sagebionetworks.repo.web.NotFoundException;
 import org.sagebionetworks.schema.ObjectSchema;
 import org.sagebionetworks.schema.id.SchemaId;
 import org.sagebionetworks.schema.parser.ParseException;
 import org.sagebionetworks.schema.parser.SchemaIdParser;
+import org.sagebionetworks.schema.parser.TokenMgrError;
 import org.sagebionetworks.schema.semantic.version.SemanticVersion;
 import org.sagebionetworks.workers.util.aws.message.RecoverableMessageException;
 import org.springframework.beans.factory.annotation.Autowired;
+
 import org.springframework.stereotype.Component;
 
 import com.google.common.collect.Lists;
@@ -61,8 +64,9 @@ public class SynapseSchemaBootstrapImpl implements SynapseSchemaBootstrap {
 			VirtualTable.class.getName(),
 			DockerRepository.class.getName(),
 			Link.class.getName(),
-			RecordSet.class.getName()
-		);
+			RecordSet.class.getName(),
+			SearchIndex.class.getName()
+	);
 
 	@Autowired
 	private JsonSchemaManager jsonSchemaManager;
@@ -78,7 +82,7 @@ public class SynapseSchemaBootstrapImpl implements SynapseSchemaBootstrap {
 	public void bootstrapSynapseSchemas() throws RecoverableMessageException {
 		// The process is run as the Synapse admin
 		UserInfo adminUser = userManager.getUserInfo(BOOTSTRAP_PRINCIPAL.THE_ADMIN_USER.getPrincipalId());
-		
+
 		createOrganizationIfDoesNotExist(adminUser);
 
 		List<ObjectSchema> allSchemasToBootstrap = loadAllSchemasAndReferences(OBJECTS_TO_BOOTSTRAP);
@@ -101,9 +105,14 @@ public class SynapseSchemaBootstrapImpl implements SynapseSchemaBootstrap {
 			return jsonSchemaManager.getOrganizationByName(adminUser, ORG_SAGEBIONETWORKS);
 		} catch (NotFoundException e) {
 			// Need to create the organization
-			CreateOrganizationRequest request = new CreateOrganizationRequest();
-			request.setOrganizationName(ORG_SAGEBIONETWORKS);
-			return jsonSchemaManager.createOrganziation(adminUser, request, ORG_SAGEBIONETWORKS_ID);
+			try {
+				CreateOrganizationRequest request = new CreateOrganizationRequest();
+				request.setOrganizationName(ORG_SAGEBIONETWORKS);
+				return jsonSchemaManager.createOrganziation(adminUser, request, ORG_SAGEBIONETWORKS_ID);
+			} catch (IllegalArgumentException ex) {
+				// The organization was created between our check and insert attempt
+				return jsonSchemaManager.getOrganizationByName(adminUser, ORG_SAGEBIONETWORKS);
+			}
 		}
 	}
 
@@ -136,7 +145,7 @@ public class SynapseSchemaBootstrapImpl implements SynapseSchemaBootstrap {
 		request.setSchema(schema);
 		jsonSchemaManager.createJsonSchema(admin, request);
 	}
-	
+
 	/**
 	 * Use the latest version of each referenced schema.
 	 * @param schema
@@ -160,7 +169,7 @@ public class SynapseSchemaBootstrapImpl implements SynapseSchemaBootstrap {
 	 * empty Optional will be returned. If a version exists but the SHA256 does not
 	 * match the patch number of the current version plus one will be returned. If
 	 * the schema does not exist at all a patch number of zero will be returned.
-	 * 
+	 *
 	 * @param organizationName
 	 * @param schemaName
 	 * @return
@@ -184,7 +193,9 @@ public class SynapseSchemaBootstrapImpl implements SynapseSchemaBootstrap {
 		} catch (NotFoundException e) {
 			// This will be the first version of this schema, so start at patch zero.
 			return Optional.of(0L);
-		} catch (ParseException e) {
+		} catch (ParseException | TokenMgrError e) {
+			// This parser is invoked directly rather than through SchemaIdParser.parseSchemaId, so it
+			// must guard against TokenMgrError itself.
 			throw new IllegalStateException(e);
 		}
 	}
@@ -192,7 +203,7 @@ public class SynapseSchemaBootstrapImpl implements SynapseSchemaBootstrap {
 	/**
 	 * Load all of the given schemas and their dependencies. Dependencies will be
 	 * listed before the objects that depend on them.
-	 * 
+	 *
 	 * @param schemaClassNames
 	 * @return
 	 */

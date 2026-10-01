@@ -12,10 +12,12 @@ import org.sagebionetworks.asynchronous.workers.concurrent.ConcurrentWorkerStack
 import org.sagebionetworks.database.semaphore.CountingSemaphore;
 import org.sagebionetworks.file.worker.FileHandleStreamWorker;
 import org.sagebionetworks.grid.workers.GridSessionIndexWorker;
+import org.sagebionetworks.recordset.worker.RecordSetIndexWorker;
 import org.sagebionetworks.replication.workers.ObjectReplicationReconciliationWorker;
 import org.sagebionetworks.replication.workers.ObjectReplicationWorker;
 import org.sagebionetworks.repo.model.ObjectType;
 import org.sagebionetworks.search.oss.worker.SearchIndexWorker;
+import org.sagebionetworks.search.workers.SearchIndexLifecycleWorker;
 import org.sagebionetworks.snapshot.workers.ObjectSnapshotWorker;
 import org.sagebionetworks.snapshot.workers.writers.ObjectRecordWriter;
 import org.sagebionetworks.table.worker.MaterializedViewUpdateWorker;
@@ -121,6 +123,29 @@ public class ChangeMessageWorkersConfig {
 	}
 	
 	@Bean
+	public SimpleTriggerFactoryBean recordSetIndexWorkerTrigger(RecordSetIndexWorker recordSetIndexWorker) {
+
+		String queueName = stackConfig.getQueueName("RECORDSET_UPDATE");
+		MessageDrivenRunner worker = new ChangeMessageBatchProcessor(amazonSQSClient, queueName, recordSetIndexWorker);
+
+		return new WorkerTriggerBuilder()
+			.withStack(ConcurrentWorkerStack.builder()
+				.withSemaphoreLockKey("recordSetIndexWorker")
+				.withSemaphoreMaxLockCount(10)
+				.withSemaphoreLockAndMessageVisibilityTimeoutSec(1200)
+				.withMaxThreadsPerMachine(3)
+				.withSingleton(concurrentStackManager)
+				.withCanRunInReadOnly(true)
+				.withQueueName(queueName)
+				.withWorker(worker)
+				.build()
+			)
+			.withRepeatInterval(1733)
+			.withStartDelay(311)
+			.build();
+	}
+
+	@Bean
 	public SimpleTriggerFactoryBean tableViewWorkerTrigger(TableViewWorker tableViewWorker) {
 		
 		String queueName = stackConfig.getQueueName("TABLE_VIEW");
@@ -165,7 +190,7 @@ public class ChangeMessageWorkersConfig {
 			.withStartDelay(253)
 			.build();
 	}
-	
+
 	@Bean
 	public SimpleTriggerFactoryBean fileHandleStreamWorkerTrigger(StackStatusGate stackStatusGate, FileHandleStreamWorker fileHandleStreamWorker) {
 		
@@ -285,6 +310,29 @@ public class ChangeMessageWorkersConfig {
 			)
 			.withRepeatInterval(1532)
 			.withStartDelay(1236)
+			.build();
+	}
+
+	@Bean
+	public SimpleTriggerFactoryBean searchIndexLifecycleWorkerTrigger(SearchIndexLifecycleWorker searchIndexLifecycleWorker) {
+
+		String queueName = stackConfig.getQueueName("SEARCH_INDEX_LIFECYCLE");
+		MessageDrivenRunner worker = new ChangeMessageBatchProcessor(amazonSQSClient, queueName, searchIndexLifecycleWorker);
+
+		return new WorkerTriggerBuilder()
+			.withStack(ConcurrentWorkerStack.builder()
+				.withSemaphoreLockKey("searchIndexLifecycleWorker")
+				.withSemaphoreMaxLockCount(4)
+				.withSemaphoreLockAndMessageVisibilityTimeoutSec(300)
+				.withMaxThreadsPerMachine(2)
+				.withSingleton(concurrentStackManager)
+				.withCanRunInReadOnly(false)
+				.withQueueName(queueName)
+				.withWorker(worker)
+				.build()
+			)
+			.withRepeatInterval(2053)
+			.withStartDelay(523)
 			.build();
 	}
 

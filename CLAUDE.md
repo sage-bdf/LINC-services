@@ -4,13 +4,14 @@ Backend platform for Sage Bionetworks' Synapse — a collaborative research data
 
 ## Tech Stack
 
-- **Java 11** (do not use Java 17+ features)
-- **Spring 5.3.39** (Spring MVC, Spring JDBC, Spring AOP) — NOT Spring Boot, NOT Spring 6
-- **javax.servlet / javax.annotation** — NOT jakarta.* (Spring 6 migration pending)
-- **MySQL 8.0** via Spring JdbcTemplate (no ORM, no Spring Data)
-- **Tomcat 9** (WAR deployment)
+- **Java 21 LTS**
+- **Spring 6.x** (Spring MVC, Spring JDBC, Spring AOP) — NOT Spring Boot
+- **jakarta.servlet / jakarta.annotation** — migrated from javax.* for Spring 6 compatibility
+- **MySQL 8.x** via Spring JdbcTemplate (no ORM, no Spring Data)
+- **Tomcat 10x** (WAR deployment)
 - **Jackson 2.20.0**, Log4j 2, Guava 30.1.1
-- **AWS SDK v1** (1.12.x) + **AWS SDK v2** (2.29.x), Google Cloud Storage
+- **AWS SDK v1** (1.12.x) + **AWS SDK v2** (2.40.x), Google Cloud Storage — v1 is being phased out client-by-client for v2 (see `lib/stackConfiguration` `AwsClientFactory` → `AwsClientFactoryV2`)
+- **Spring AI** (`spring-ai-bom`, `spring-ai-agentcore-bom`) — Bedrock Converse `ChatModel` + AgentCore code-interpreter for the AI agent feature (wired in `SpringAiConfiguration`)
 - **No Lombok**
 
 ## Build Commands
@@ -21,6 +22,13 @@ mvn clean install -pl <module-path> -DskipTests          # Single module
 mvn test -pl <module-path>                               # Unit tests for module
 mvn test -pl <module-path> -Dtest=<TestClassName>        # Single test class
 ```
+
+## Maven Dependency Management
+
+- **Dependency versions**: ALL dependency versions (including internal lib modules) MUST be defined in the root `pom.xml` `<dependencyManagement>` section
+- **Sub-module poms**: Sub-module `pom.xml` files declare dependencies WITHOUT `<version>` tags — versions are inherited from the root
+- **Why**: This ensures consistent versions across all modules and prevents version conflicts in the reactor build
+- **Example**: When adding a new lib module (e.g., `lib-database-configuration`), add it to the root pom's `<dependencyManagement>` with `<version>${project.version}</version>`, then sub-modules can reference it with just `<groupId>` and `<artifactId>`
 
 ## Module Structure
 
@@ -38,6 +46,8 @@ platform (root)
 │   ├── lib-worker/               # Worker framework
 │   ├── lib-grid/                 # JSON-Joy CRDT model objects (CBOR encoding)
 │   ├── lib-grid-db/              # Grid CRDT relational database persistence
+│   ├── lib-database-configuration/ # DataSource/JdbcTemplate beans + @WriteTransaction annotations
+│   ├── lib-docusign/             # DocuSign e-signature integration
 │   └── ...                       # id-generator, database-semaphore, lib-upload, etc.
 ├── services/
 │   ├── repository-managers/      # Business logic (Manager interfaces + impls)
@@ -60,7 +70,7 @@ platform (root)
 - Package: `org.sagebionetworks.repo.manager`
 - Interface + Impl pattern (e.g., `EntityManager` / `EntityManagerImpl`)
 - `@Service` on implementations, constructor injection preferred
-- `@WriteTransaction` for write operations (from `org.sagebionetworks.repo.transactions`)
+- `@WriteTransaction` for write operations (`org.sagebionetworks.repo.transactions`, defined in the `lib-database-configuration` module)
 - Also: `@MandatoryWriteTransaction`, `@NewWriteTransaction`
 - Input validation: `ValidateArgument.required(value, "fieldName")`
 
@@ -79,10 +89,21 @@ platform (root)
 
 ## Testing
 
-- Unit tests: `*Test.java` — JUnit 5 + Mockito 2.27
+- Unit tests: `*Test.java` — JUnit 5 + Mockito 5.x
   - `@ExtendWith(MockitoExtension.class)`, `@Mock`, `@InjectMocks`
 - Integration tests: `IT*.java` (in integration-test module)
-- Mockito 2.27 — no `mockStatic` or Mockito 4/5 APIs
+- **Mockito 5.x** — strict stubbing is enabled by default
+  - **Functional/lambda parameters**: When mocking methods that accept functional interfaces (e.g., OpenSearch Java client's `search(Function<...>, Class)`), use `doAnswer()` to execute the lambda parameter. The lambda must be invoked to trigger validation logic inside it. See `OpenSearchManagerImplTest.stubSearchToExecuteLambda()` for the pattern.
+  - **Varargs parameters**: When a method has varargs and the implementation passes an array, match with the array type. Example: for `method(String... keys)` called with `String[]`, use `any(String[].class)` not `any(String.class)`. For `method(IdAndVersion... ids)` called with `IdAndVersion[]`, use `any(IdAndVersion[].class)`.
+  - **Overloaded methods**: When mocking overloaded methods, be explicit about which overload to match — using `any()` without type can cause ambiguous method reference errors.
+  - **No lenient stubbing**: Lenient stubbing (`@MockitoSettings(strictness = Strictness.LENIENT)`) is not allowed in this codebase — fix argument matchers instead.
+- **Test method naming**: `test<methodUnderTest>With<condition>` — e.g., `testCreateWithNonSageUser`, `testGetWithNonExistentId`, `testListWithMultipleOrganizations`. For IT CRUD lifecycle tests: `testCRUDWith<context>`.
+- **Test method structure**: Mark the primary method being tested with a `// call under test` comment directly above it — this makes each test's intent immediately clear during review
+- **Verify no downstream calls after exceptions**: After `assertThrows`, verify that mocked methods past the exception point were NOT called — use `verifyZeroInteractions(mock)` or `verify(mock, never()).method(...)`
+- **Assert on whole objects**: Use `assertEquals(expected, actual)` on objects rather than comparing individual fields — generated POJOs have correct `equals()`/`hashCode()`. Only assert individual fields when testing a specific field transformation.
+- **Include real data in tests**: Don't test CRUD with empty payloads. If a feature serializes data (e.g., JSON columns), include actual values in the test fixture and verify the round-trip — because a bug in serialization won't surface if the payload is empty.
+- **List/filter tests need multiple groups**: When testing list/filter operations, create entries across at least 2 categories (e.g., 2 items in org1, 2 in org2). Verify each filtered list returns the correct subset AND verify ordering is deterministic — because a single-group test can pass even if filtering is broken.
+- **Update tests must verify data changed**: Assert that updated values are present in the result, not just that metadata (etag) rotated — because an etag rotation doesn't prove the data write succeeded.
 
 ## Deployment & Migration
 
@@ -122,10 +143,11 @@ Key classes:
 When creating new database tables, the DBO must implement `MigratableDatabaseObject<D, B>`:
 - Provide a `MigrationType` (order matters — must come after dependencies)
 - Provide a `MigratableTableTranslation` for backup/restore conversion
-- Register primary types in `lib/jdomodels/src/main/resources/dbo-beans.spb.xml` (order matters)
+- Primary types are discovered by `DboAutoDiscovery` classpath scan — place the DBO under an existing `org.sagebionetworks.repo.model.dbo.*` persistence package (follow the standard package pattern rather than inventing a new package name) and annotate the DAO `@Repository`. Only packages listed in `DboAutoDiscovery.DBO_PACKAGES` are scanned, so a DBO in a new/creative package is silently never discovered or migrated.
+- DDL creation order is derived automatically by `DboDependencyAnalyzer` (parses `FOREIGN KEY ... REFERENCES` from each DDL) — no manual ordering
 - Secondary types are discovered automatically via `getSecondaryTypes()`
 - Primary tables need an etag column (NOT NULL) for change detection; secondary tables need a foreign key to their owner's backup ID
-- Key test: `services/repository/src/test/java/org/sagebionetworks/repo/web/migration/MigrationIntegrationAutowireTest.java` — extend this when adding new migratable types
+- Key test: `MigratableTableDAOImplAutowireTest.testAllMigrationTypesRegistered()` (`lib/jdomodels/src/test/java/org/sagebionetworks/repo/model/dbo/migration/MigratableTableDAOImplAutowireTest.java`) — validates all `MigrationType` values have registered DBOs
 
 ### Moving Data Between Tables (cross-stack safe)
 
@@ -133,70 +155,66 @@ Use a two-stack rollout:
 1. **Stack N**: Add data mirroring (write to both old and new table) + backfilling via `MigrationTypeListener` registered in `managers-spb.xml`
 2. **Stack N+1**: Remove mirroring, switch reads to new table as source of truth
 
+## Async Jobs & Workers
+
+See `services/workers/CLAUDE.md` for the async job framework, worker types, registration, trigger configuration, and SQS queue infrastructure.
+
+### Renaming a Column (cross-stack safe)
+
+When a DB column is renamed (e.g., `PROJECT_ID` → `OBJECT_ID`), the backup XML from production still serializes the **old Java field name**. Use a two-stack bridge pattern:
+
+1. **Stack N** (this stack):
+   - Update the DDL to use the new column name.
+   - Add a new Java field with the new name (`objectId`) mapped to the new column via `FieldColumn("objectId", COL_NEW_NAME)`.
+   - Keep the old Java field (`projectId`) as a temporary bridge — it has no `FieldColumn` mapping but is still deserialized from old backup XML.
+   - In `MigratableTableTranslation.createDatabaseObjectFromBackup()`, copy the old field into the new field if the new field is null: `if (dbo.getObjectId() == null && dbo.getProjectId() != null) { dbo.setObjectId(dbo.getProjectId()); }`
+   - All new code reads/writes the new field (`objectId`). The old field is only used by the translator.
+2. **Stack N+1** (after production has the new column):
+   - Remove the old bridge field (`projectId`) and the translator bridge logic. The new field is now the sole source of truth.
+
 ## Curation Grid (Curator)
 
-A spreadsheet-style collaborative editing feature that allows data curators to annotate files (FileEntity annotations) and manage record-based metadata (RecordSet entities). Unlike the standard Controller → Manager → DAO pattern, the grid uses a **CRDT (Conflict-free Replicated Data Type)** architecture based on the [JSON-Joy](https://jsonjoy.com/) specification, enabling real-time multi-user and AI-assisted editing.
-
-### Hub-and-Replica Architecture
-
-- **Grid Session**: Created via async job (`POST /grid/session/async/start`). Represents a collaborative editing session backed by a CRDT document.
-- **Replicas**: Each connected client (or AI agent) gets a unique replica with a numeric `replicaId`. Single writer per replica, multiple readers allowed.
-- **Hub**: A cluster of workers that receives patches from all replicas via an **SQS queue**, persists them, and broadcasts `"new-patch"` notifications to all connected replicas.
-
-### WebSocket Protocol
-
-Uses **AWS API Gateway WebSocket** (NOT Spring STOMP/SockJS) with a custom messaging protocol based on the [json-rx specification](https://jsonjoy.com/specs/json-rx/messages):
-- Message format: `[type, sequence, method, payload]` — e.g., `[1, 42, "patch", <data>]`
-- Methods: `"patch"` (send CRDT patch), `"synchronize-clock"` (replica sends version vector to hub)
-- Notifications: `"new-patch"`, `"ping"`/`"pong"`
-- Connection via **pre-signed URL** (15 min expiry) from `POST /grid/{sessionId}/presigned/url`
-
-### CRDT Document Model
-
-The grid document uses JSON-Joy CRDT node types:
-- `con` (Constant) — immutable cell values and metadata
-- `vec` (Vector) — LWW append-only arrays for column names and row data (max 256 entries)
-- `arr` (RGA Array) — mutable ordered arrays for column order and row order
-- Patches encoded in json-joy [compact format](https://jsonjoy.com/specs/json-crdt-patch/encoding/compact-format), serialized as **CBOR** (Jackson `jackson-dataformat-cbor`)
-
-### Database Representation
-
-Grid patches are stored relationally in `lib-grid-db` tables — the full CRDT document is **never loaded into memory**. A SQL template (`services/repository-managers/src/main/resources/grid/grid-index-view-template.sql`) joins patch tables to produce a paginated tabular view, enabling efficient reads over large datasets.
-
-### AI Agent Integration
-
-The AI Grid Assistant binds to a grid session via `GridAgentSessionContext` (containing `gridSessionId` and `usersReplicaId`). The agent reads and writes grid data through **MCP services** (Grid Query / Grid Update) that translate SQL-like operations into CRDT patches flowing through the same hub.
-
-### Validation Worker
-
-A dedicated worker listens to grid changes via an SQS queue, validates each changed row against the bound **JSON Schema**, and writes validation results back as CRDT patches to `rows[*].metadata.rowValidation`.
-
-### Key REST APIs
-
-- `POST /grid/session/async/start` — create a grid session (async job, takes `CreateGridRequest`)
-- `GET /grid/session/async/get/{asyncToken}` — poll for session creation result
-- `POST /grid/{sessionId}/replica` — create a new replica
-- `POST /grid/{sessionId}/presigned/url` — get pre-signed WebSocket URL
+See `services/repository-managers/CLAUDE.md` and `lib/lib-grid/CLAUDE.md` for the CRDT-based grid architecture, WebSocket protocol, and AI agent integration.
 
 ## Key Conventions
 
+- **No wildcard imports** — use explicit imports (e.g., `import java.util.List;`), not `import java.util.*;`
 - Package root: `org.sagebionetworks`
 - Branch naming: `PLFM-XXXX` (JIRA tickets)
 - Main branch: `develop`
 - Entity IDs: String-typed but numeric (`KeyFactory` converts)
 - Spring config: mix of XML (`WEB-INF/` and `src/main/resources/*-spb.xml`) and annotations
 - Logging: Log4j 2
-- **JSON serialization**: Use `JDOSecondaryPropertyUtils.createJSONFromObject()` / `createObjectFromJSON()` for converting `JSONEntity` objects to/from JSON strings. Do not write custom serialization code.
-- **SQL safety**: All SQL must use bind variables. Never concatenate strings into SQL. For generated values (UUIDs, timestamps), prefer MySQL functions (`UUID()`, `NOW(3)`) over Java-side generation.
-- **Controller testing**: Use IT tests with the Java client in `integration-test/`, not autowired controller tests. Every new controller method needs a corresponding `SynapseClient`/`SynapseClientImpl` method and an IT test.
+- **JSON serialization**: Use `JDOSecondaryPropertyUtils.createJSONFromObject()` / `createObjectFromJSON()` for converting `JSONEntity` objects to/from JSON strings. Do not write custom `ObjectMapper` or `JSONObjectAdapter` serialization code in DAO classes.
+- **SQL safety**: All SQL must use bind variables. Never concatenate strings into SQL. For generated values (UUIDs, timestamps), prefer MySQL functions (`UUID()`, `NOW(3)`) over Java-side generation. For `DELETE` without specific criteria, always add `WHERE ID > -1` (required for SQL safe-updates mode).
+- **SQL style**: Write SQL inline where it's used. Do not concatenate `SqlConstants` references into SQL query strings. Constants are appropriate in DDL, DBO field mappings, and row mappers — just not for building query strings.
+- **Controller testing**: Use IT tests with the Java client in `integration-test/`, not autowired controller tests (`*AutowiredTest` classes). Every new controller method needs a corresponding `SynapseClient`/`SynapseClientImpl` method and an IT test. Deep logic checks belong in manager unit tests; IT tests just verify each HTTP call works.
+- **Exception mapping**: `NumberFormatException` extends `IllegalArgumentException`, which maps to HTTP 400. It is acceptable to let it propagate without wrapping.
+- **Reuse existing constants**: Before defining a new string constant, check if it already exists in a shared constants class (e.g., `SqlConstants`). Add new constants to the appropriate shared class rather than defining them locally.
+- **Multi-value LIST columns**: Stored as JSON on the main table (`T<id>`) and unnested at query time via `JSON_TABLE(...)` — they are **not** separate physical index tables (that model was removed in PLFM-7968).
+
+## Code Comments
+
+- **Prioritize Expressive Code**: Write highly readable, self-documenting code as the primary means of explanation. Use comments exclusively to provide critical context that cannot be naturally expressed through clean naming conventions and clear structure.
+- **Target the Audience (Javadocs vs. Inline)**: Match documentation placement to its specific consumer:
+  - **Public API (Javadocs)**: Focus class and method Javadocs strictly on the public contract, defining the behavior, parameters, and return values expected by the caller at that specific level of abstraction.
+  - **Internal Logic (Inline Comments)**: Place all underlying execution details, algorithmic mechanics, and internal complexities entirely within inline comments inside the implementation body.
+- **Document Intent, Refactor Mechanics**: Dedicate internal comments to explaining the underlying business logic, constraints, and rationale behind the code (the Why). Allow the code architecture to explain the execution (the What). Treat any impulse to write step-by-step prose about what the code is doing as an immediate signal to refactor the code into clearer, smaller functions.
+- **Current State Only**: Code comments and CLAUDE.md files should exclusively describe the current state, logic, and intent of the code.
+  - Keep historical context, diff explanations, and "before vs. after" commentary entirely within planning documents, commit messages, PR descriptions, or narrowly scoped as comments that are co-located with specific regression tests.
+  - Limit references to past logic strictly to active, ongoing code migration paths that directly impact current execution.
+- **Stable References**: Code comments and CLAUDE.md files should use reference points that survive automated refactoring and ongoing codebase evolution.
+  - Point to other code exclusively through language-supported dynamic links (like Javadoc {@link}) or external issue keys (like PLFM-1234).
+  - Define target locations using conceptual names or programmable signatures instead of brittle options like absolute file paths or hard-coded line numbers.
+
 
 ## Critical Constraints
 
-1. **Java 11 only** — no var in lambdas, no records, no text blocks, no sealed classes
-2. **javax namespace** — not jakarta.*
-3. **Spring 5.3** — no Spring 6+ or Spring Boot APIs
-4. **Mockito 2.27** — no mockStatic, no Mockito 4/5 features
+1. **Java 21 LTS** — Java 21 language features are now available (records, text blocks, pattern matching, sealed classes, virtual threads)
+2. **jakarta namespace** — migrated from javax.* for Spring 6 compatibility
+3. **Spring 6.1** — no Spring Boot APIs
+4. **Mockito 5.x** — strict stubbing enabled by default (no lenient stubbing; fix argument matchers instead)
 5. **No Lombok**
 6. **No Spring Data** — all DB via JdbcTemplate
 7. **WAR packaging** — not executable JARs
-8. **Migration-safe schema changes** — new DBO tables must implement `MigratableDatabaseObject` and be registered in `dbo-beans.spb.xml`; data moves between tables require a two-stack mirroring/backfill rollout
+8. **Migration-safe schema changes** — new DBO tables must implement `MigratableDatabaseObject` and live in a package scanned by `DboAutoDiscovery`; data moves between tables require a two-stack mirroring/backfill rollout

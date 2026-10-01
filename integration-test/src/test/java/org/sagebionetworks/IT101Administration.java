@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,12 +23,25 @@ import org.sagebionetworks.client.exceptions.SynapseServerException;
 import org.sagebionetworks.repo.model.Entity;
 import org.sagebionetworks.repo.model.ObjectType;
 import org.sagebionetworks.repo.model.Project;
+import org.sagebionetworks.repo.model.admin.UpdateNotificationEmailRequest;
+import org.sagebionetworks.repo.model.auth.TotpSecret;
+import org.sagebionetworks.repo.model.auth.TotpSecretActivationRequest;
+import org.sagebionetworks.repo.model.auth.TwoFactorAuthStatus;
+import org.sagebionetworks.repo.model.auth.TwoFactorState;
 import org.sagebionetworks.repo.model.message.ChangeMessages;
 import org.sagebionetworks.repo.model.migration.IdGeneratorExport;
+import org.sagebionetworks.repo.model.principal.NotificationEmail;
 import org.sagebionetworks.repo.model.status.StackStatus;
 import org.sagebionetworks.repo.model.status.StatusEnum;
 import org.sagebionetworks.repo.model.versionInfo.SynapseVersionInfo;
 import org.sagebionetworks.schema.adapter.JSONObjectAdapterException;
+
+import dev.samstevens.totp.code.CodeGenerator;
+import dev.samstevens.totp.code.DefaultCodeGenerator;
+import dev.samstevens.totp.exceptions.CodeGenerationException;
+import dev.samstevens.totp.exceptions.TimeProviderException;
+import dev.samstevens.totp.time.SystemTimeProvider;
+import dev.samstevens.totp.time.TimeProvider;
 
 /**
  * This test will push data from a backup into Synapse
@@ -189,5 +203,66 @@ public class IT101Administration {
 		
 		// The userClient now impersonates the test user
 		toDelete.add(userClient.createEntity(new Project()));
+	}
+
+	@Test
+	public void testDisable2FaForUser() throws SynapseException, JSONObjectAdapterException {
+		SynapseClient userClient = new SynapseClientImpl();
+		Long userId = SynapseClientHelper.createUser(adminSynapse, userClient);
+
+		try {
+			TotpSecret secret = userClient.init2Fa();
+			TwoFactorAuthStatus status = userClient.enable2Fa(new TotpSecretActivationRequest()
+					.setSecretId(secret.getSecretId())
+					.setTotp(generateTotpCode(secret.getSecret())));
+			assertEquals(TwoFactorState.ENABLED, status.getStatus());
+
+			// Call under test
+			adminSynapse.disable2FaForUser(userId);
+
+			assertEquals(TwoFactorState.DISABLED, userClient.get2FaStatus().getStatus());
+
+			// Idempotent — calling again on a user with no 2FA must not throw
+			adminSynapse.disable2FaForUser(userId);
+		} finally {
+			try {
+				adminSynapse.deleteUser(userId);
+			} catch (SynapseException ignored) {
+			}
+		}
+	}
+
+	@Test
+	public void testUpdateUserNotificationEmailWithNewAddress() throws SynapseException, JSONObjectAdapterException {
+		SynapseClient userClient = new SynapseClientImpl();
+		Long userId = SynapseClientHelper.createUser(adminSynapse, userClient);
+
+		try {
+			String newEmail = UUID.randomUUID().toString() + "@test.com";
+			UpdateNotificationEmailRequest request = new UpdateNotificationEmailRequest().setEmail(newEmail);
+
+			// Call under test
+			NotificationEmail result = adminSynapse.updateUserNotificationEmail(userId, request);
+
+			assertEquals(newEmail, result.getEmail());
+
+			// Idempotent - setting the same address again is a no-op
+			assertEquals(newEmail, adminSynapse.updateUserNotificationEmail(userId, request).getEmail());
+		} finally {
+			try {
+				adminSynapse.deleteUser(userId);
+			} catch (SynapseException ignored) {
+			}
+		}
+	}
+
+	private String generateTotpCode(String secret) {
+		try {
+			CodeGenerator totpGenerator = new DefaultCodeGenerator();
+			TimeProvider timeProvider = new SystemTimeProvider();
+			return totpGenerator.generate(secret, Math.floorDiv(timeProvider.getTime(), 30));
+		} catch (TimeProviderException | CodeGenerationException e) {
+			throw new RuntimeException(e);
+		}
 	}
 }

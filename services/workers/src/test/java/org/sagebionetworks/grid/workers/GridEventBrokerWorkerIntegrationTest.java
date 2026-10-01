@@ -36,6 +36,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.sagebionetworks.AsynchronousJobWorkerHelper;
 import org.sagebionetworks.aws.SynapseS3Client;
 import org.sagebionetworks.grid.db.GridIndexDao;
+import org.sagebionetworks.repo.manager.CertifiedUserManager;
 import org.sagebionetworks.repo.manager.EntityManager;
 import org.sagebionetworks.repo.manager.UserManager;
 import org.sagebionetworks.repo.manager.file.FileHandleManager;
@@ -70,6 +71,7 @@ import org.sagebionetworks.repo.model.entity.BindSchemaToEntityRequest;
 import org.sagebionetworks.repo.model.file.ExternalFileHandle;
 import org.sagebionetworks.repo.model.file.S3FileHandle;
 import org.sagebionetworks.repo.model.grid.CreateGridPresignedUrlRequest;
+import org.sagebionetworks.repo.model.grid.AuthorizationMode;
 import org.sagebionetworks.repo.model.grid.CreateGridRequest;
 import org.sagebionetworks.repo.model.grid.CreateGridResponse;
 import org.sagebionetworks.repo.model.grid.CreateReplicaRequest;
@@ -84,6 +86,8 @@ import org.sagebionetworks.repo.model.grid.GridRecordSetExportResponse;
 import org.sagebionetworks.repo.model.grid.GridReplica;
 import org.sagebionetworks.repo.model.grid.GridSession;
 import org.sagebionetworks.repo.model.grid.GridUtils;
+import org.sagebionetworks.repo.model.grid.SynchronizeGridRequest;
+import org.sagebionetworks.repo.model.grid.SynchronizeGridResponse;
 import org.sagebionetworks.repo.model.grid.patch.ConType;
 import org.sagebionetworks.repo.model.grid.patch.ConValue;
 import org.sagebionetworks.repo.model.grid.patch.LogicalTimestamp;
@@ -217,6 +221,9 @@ public class GridEventBrokerWorkerIntegrationTest {
 
 	@Autowired
 	private DBOChangeDAO changeDao;
+
+	@Autowired
+	private CertifiedUserManager certifiedUserManager;
 
 	private UserInfo admin;
 
@@ -437,6 +444,90 @@ public class GridEventBrokerWorkerIntegrationTest {
 				return Pair.create(viewRows.size() == 3, viewRows);
 			}
 		});
+	}
+
+	/**
+	 * Reproduction test for the bug where applySnapshot() calls deleteReplica(), which cascade-deletes
+	 * GRID_REPLICA_MESSAGE (the active message chain). The hub then sends patches from non-INTERNAL replicas
+	 * (e.g. IMPORT from a CSV import), but the chain is gone so the patches are permanently discarded.
+	 * The export then blocks forever because getCurrentClockIfAllPatchesApplied() finds those patches missing.
+	 *
+	 * Without the fix: the export job gets stuck in PROCESSING (RecoverableMessageException loop).
+	 * With the fix (clearReplicaData instead of deleteReplica): all patches applied in one sync cycle,
+	 * export succeeds.
+	 */
+	@Test
+	public void testGridRebuildAfterSnapshotWithMultipleReplicas() throws Exception {
+		Project project = entityService.createEntity(admin.getId(), new Project().setName("RebuildTest"), null);
+
+		String csvContent = "integer_column,string_column\n1,row_one\n2,row_two\n3,row_three\n";
+		S3FileHandle fileHandle = fileHandleManager.createFileFromByteArray(admin.getId().toString(), new Date(),
+				csvContent.getBytes(StandardCharsets.UTF_8), "data.csv", ContentType.create("text/csv"), null);
+
+		RecordSet recordSet = entityService.createEntity(admin.getId(),
+				new RecordSet().setParentId(project.getId()).setName("testRecordSet")
+						.setDataFileHandleId(fileHandle.getId()).setUpsertKey(List.of("integer_column")),
+				null);
+
+		// Create grid session — RecordSetCreateGridHandler creates a snapshot using the INTERNAL replica ID
+		// for all node timestamps, so the snapshot clock only covers the INTERNAL replica.
+		GridSession session = asynchronousJobWorkerHelper.assertJobResponse(admin,
+				new CreateGridRequest().setRecordSetId(recordSet.getId()),
+				(CreateGridResponse response) -> {
+					assertNotNull(response);
+					assertNotNull(response.getGridSession());
+				}, MAX_WAIT_MS).getResponse().getGridSession();
+
+		// Wait for the internal replica to be ready
+		TimeUtils.waitFor(MAX_WAIT_MS, 1000L, () -> {
+			Optional<GridHeader> op = gridViewManager.readHeader(session.getSessionId(), INTERNAL_REPLICA_ID);
+			System.out.println("Waiting for internal replica to be ready...");
+			return Pair.create(op.isPresent(), null);
+		});
+
+		// Run a CSV import — this creates patches in GRID_PATCH from the IMPORT replica
+		// (a different replica ID than INTERNAL). These patches will be missing from the
+		// snapshot clock, so the hub must send them in the second half of the sync cycle.
+		csvContent = "integer_column,string_column\n4,row_four\n";
+		S3FileHandle uploadFileHandle = fileHandleManager.createFileFromByteArray(admin.getId().toString(), new Date(),
+				csvContent.getBytes(StandardCharsets.UTF_8), "upload.csv", ContentType.create("text/csv"), null);
+
+		CsvTableDescriptor csvDescriptor = new CsvTableDescriptor().setIsFirstLineHeader(true);
+		List<ColumnModel> importSchema = List.of(
+				new ColumnModel().setName("integer_column").setColumnType(ColumnType.INTEGER),
+				new ColumnModel().setName("string_column").setColumnType(ColumnType.STRING));
+
+		asynchronousJobWorkerHelper.assertJobResponse(admin,
+				new GridCsvImportRequest().setSessionId(session.getSessionId())
+						.setCsvDescriptor(csvDescriptor)
+						.setFileHandleId(uploadFileHandle.getId())
+						.setSchema(importSchema),
+				(GridCsvImportResponse response) -> assertNotNull(response), MAX_WAIT_MS);
+
+		// Simulate migration to a new stack: delete all grid index data.
+		gridIndexDao.truncateAll();
+
+		// Trigger the same event that ChangeSentMessageSynchWorker fires on a new stack.
+		ChangeMessage change = changeDao.replaceChange(
+				new ChangeMessage().setChangeType(ChangeType.UPDATE).setObjectType(ObjectType.GRID_SESSION)
+						.setObjectId(GridUtils.gridSessionIdAsLong(session.getSessionId()).toString()));
+		repositoryMessagePublisher.publishBatchToTopic(ObjectType.GRID_SESSION, List.of(change));
+
+		// The export calls getGridHeaderOrThrow() -> getCurrentClockIfAllPatchesApplied(),
+		// which requires ALL patches (INTERNAL + IMPORT) to be applied.
+		// Without the fix: applySnapshot() deletes the message chain, the hub's IMPORT
+		// patches are discarded (GridReplicaWorker catches the IllegalArgumentException and
+		// deletes the SQS message), and the export loops forever on RecoverableMessageException.
+		// With the fix: the chain is preserved, IMPORT patches are applied in the same
+		// sync cycle, and the export succeeds.
+		GridRecordSetExportResponse exportResponse = asynchronousJobWorkerHelper.assertJobResponse(admin,
+				new GridRecordSetExportRequest().setSessionId(session.getSessionId()),
+				(GridRecordSetExportResponse response) -> {
+					assertNotNull(response);
+					assertEquals(session.getSessionId(), response.getSessionId());
+				}, MAX_WAIT_MS).getResponse();
+
+		assertNotNull(exportResponse);
 	}
 
 	@Test
@@ -824,6 +915,171 @@ public class GridEventBrokerWorkerIntegrationTest {
 
 	}
 	
+	@Test
+	public void testGridViewWithSourceBenefactor() throws Exception {
+		UserInfo userOne = createUser();
+		UserInfo userTwo = createUser();
+		UserInfo userThree = createUser();
+
+		Project project = entityService.createEntity(admin.getId(), new Project().setName("test"), null);
+		Folder folder = entityService.createEntity(admin.getId(),
+				new Folder().setName("folder").setParentId(project.getId()), null);
+
+		ExternalFileHandle fh = fileHandleManager.createExternalFileHandle(admin, new ExternalFileHandle()
+				.setContentType("text/plain").setFileName("foo.bar").setExternalURL("https://something.org"));
+
+		int fileCount = 3;
+		List<FileEntity> files = createFiles(fileCount, folder.getId(), fh.getId());
+
+		// userOne and userTwo have READ+UPDATE on the project (the benefactor of all files).
+		// userThree has READ only — no UPDATE, so cannot join a SOURCE_BENEFACTOR session.
+		aclHelper.update(project.getId(), ObjectType.ENTITY, (a) -> {
+			a.getResourceAccess().add(createResourceAccess(userOne.getId(), ACCESS_TYPE.READ));
+			a.getResourceAccess().add(createResourceAccess(userOne.getId(), ACCESS_TYPE.UPDATE));
+			a.getResourceAccess().add(createResourceAccess(userTwo.getId(), ACCESS_TYPE.READ));
+			a.getResourceAccess().add(createResourceAccess(userTwo.getId(), ACCESS_TYPE.UPDATE));
+			a.getResourceAccess().add(createResourceAccess(userThree.getId(), ACCESS_TYPE.READ));
+		});
+
+		for (FileEntity f : files) {
+			FileEntity current = entityManager.getEntity(admin, f.getId(), FileEntity.class);
+			current.setName(current.getName() + "updated");
+			entityManager.updateEntity(admin, current, false, null);
+			current = entityManager.getEntity(admin, f.getId(), FileEntity.class);
+			asynchronousJobWorkerHelper.waitForObjectReplication(ReplicationType.ENTITY,
+					KeyFactory.stringToKey(current.getId()), current.getEtag(), MAX_WAIT_MS);
+		}
+
+		List<ColumnModel> schema = List.of(
+				new ColumnModel().setName("anInt").setColumnType(ColumnType.INTEGER)
+		);
+		schema = columnManager.createColumnModels(admin, schema);
+		List<String> colIds = schema.stream().map(c -> c.getId()).collect(Collectors.toList());
+		EntityView view = entityService.createEntity(admin.getId(),
+				new EntityView().setParentId(project.getId()).setName("aView")
+						.setColumnIds(colIds).setScopeIds(List.of(folder.getId())).setViewTypeMask(0x01L),
+				null);
+
+		String sql = String.format("select * from %s", view.getId());
+
+		asynchronousJobWorkerHelper.assertQueryResult(admin, sql, (QueryResultBundle result) -> {
+			assertEquals((long) fileCount, result.getQueryResult().getQueryResults().getRows().size());
+		}, MAX_WAIT_MS);
+
+		// userOne creates the grid session with SOURCE_BENEFACTOR mode.
+		// The session captures the project's benefactor ID since all files inherit from the project.
+		GridSession session = asynchronousJobWorkerHelper
+				.assertJobResponse(userOne,
+						new CreateGridRequest().setInitialQuery(new Query().setSql(sql))
+								.setAuthorizationMode(AuthorizationMode.SOURCE_BENEFACTOR),
+						(CreateGridResponse response) -> {
+							assertNotNull(response);
+							assertNotNull(response.getGridSession());
+						}, MAX_WAIT_MS)
+				.getResponse().getGridSession();
+		assertNotNull(session);
+		assertEquals(view.getId(), session.getSourceEntityId());
+		assertEquals(AuthorizationMode.SOURCE_BENEFACTOR, session.getAuthorizationMode());
+
+		// The session's benefactor IDs must include the project (benefactor of all files).
+		Long projectId = KeyFactory.stringToKey(project.getId());
+		Set<Long> sessionBenefactorIds = gridDao.getSessionBenefactorIds(session.getSessionId());
+		assertTrue(sessionBenefactorIds.contains(projectId));
+
+		// userOne (the session creator) can join.
+		GridReplica replicaOne = gridService
+				.createReplica(userOne.getId(), new CreateReplicaRequest().setGridSessionId(session.getSessionId()))
+				.getReplica();
+		assertNotNull(replicaOne);
+
+		// userTwo can join because they also have UPDATE on the project benefactor.
+		GridReplica replicaTwo = gridService
+				.createReplica(userTwo.getId(), new CreateReplicaRequest().setGridSessionId(session.getSessionId()))
+				.getReplica();
+		assertNotNull(replicaTwo);
+
+		// Both users establish WebSocket connections.
+		String urlOne = gridService.createPresignedUrl(userOne.getId(), new CreateGridPresignedUrlRequest()
+				.setGridSessionId(session.getSessionId()).setReplicaId(replicaOne.getReplicaId())).getPresignedUrl();
+		BlockingQueue<String> messagesOne = new LinkedBlockingQueue<>();
+		WebSocket wsOne = createConnection(urlOne, messagesOne);
+		waitForConnected(messagesOne);
+
+		String urlTwo = gridService.createPresignedUrl(userTwo.getId(), new CreateGridPresignedUrlRequest()
+				.setGridSessionId(session.getSessionId()).setReplicaId(replicaTwo.getReplicaId())).getPresignedUrl();
+		BlockingQueue<String> messagesTwo = new LinkedBlockingQueue<>();
+		WebSocket wsTwo = createConnection(urlTwo, messagesTwo);
+		waitForConnected(messagesTwo);
+
+		// userThree cannot join — READ only on the project benefactor, UPDATE is required.
+		assertThrows(UnauthorizedException.class, () -> gridService
+				.createReplica(userThree.getId(), new CreateReplicaRequest().setGridSessionId(session.getSessionId())));
+
+		// The grid must contain all rows visible to userOne (all files, since userOne has READ+UPDATE on the project).
+		TimeUtils.waitFor(MAX_WAIT_MS, 1000L, () -> {
+			Optional<GridHeader> header = gridViewManager.readHeader(session.getSessionId(), INTERNAL_REPLICA_ID);
+			if (header.isEmpty()) {
+				return Pair.create(false, null);
+			}
+			List<RowView> rows = gridViewManager.querySinglePage(header.get(), 100L, 0L);
+			return Pair.create(rows.size() == fileCount, null);
+		});
+
+		// Add a new file with its own ACL where only userOne has UPDATE.
+		// This breaks the file's ACL inheritance from the project, making the file its own benefactor.
+		// userTwo is not granted any access on this file.
+		FileEntity newFile = entityService.createEntity(admin.getId(),
+				new FileEntity().setName("newFile").setParentId(folder.getId()).setDataFileHandleId(fh.getId()), null);
+		aclHelper.create((a) -> {
+			a.setId(newFile.getId());
+			a.getResourceAccess().add(createResourceAccess(userOne.getId(), ACCESS_TYPE.READ));
+			a.getResourceAccess().add(createResourceAccess(userOne.getId(), ACCESS_TYPE.UPDATE));
+		});
+		
+		// Touch the file and wait for it to replicate so the view includes it with the correct benefactor.
+		FileEntity currentNewFile = entityManager.getEntity(admin, newFile.getId(), FileEntity.class);
+		currentNewFile.setName(currentNewFile.getName() + "updated");
+		entityManager.updateEntity(admin, currentNewFile, false, null);
+		currentNewFile = entityManager.getEntity(admin, newFile.getId(), FileEntity.class);
+		
+		asynchronousJobWorkerHelper.waitForObjectReplication(ReplicationType.ENTITY,
+				KeyFactory.stringToKey(currentNewFile.getId()), currentNewFile.getEtag(), MAX_WAIT_MS);
+		asynchronousJobWorkerHelper.assertQueryResult(admin, sql, (QueryResultBundle result) -> {
+			assertEquals((long) fileCount+1, result.getQueryResult().getQueryResults().getRows().size());
+		}, MAX_WAIT_MS);
+
+		// Run a sync job as userOne (the action user).
+		// The sync re-runs the view query using userOne's identity, which now includes the new file
+		// (userOne has READ+UPDATE on it). The new file's own ID becomes a captured benefactor ID.
+		asynchronousJobWorkerHelper.assertJobResponse(userOne,
+				new SynchronizeGridRequest().setGridSessionId(session.getSessionId()),
+				(SynchronizeGridResponse response) -> assertNotNull(response), MAX_WAIT_MS);
+
+		// After sync the session's benefactor IDs include both the project and the new file's own ID.
+		Long newFileId = KeyFactory.stringToKey(newFile.getId());
+		Set<Long> updatedBenefactorIds = gridDao.getSessionBenefactorIds(session.getSessionId());
+		assertTrue(updatedBenefactorIds.contains(projectId));
+		assertTrue(updatedBenefactorIds.contains(newFileId));
+
+		// userOne's WebSocket connection remains open — ping receives a pong.
+		wsOne.send(new JSONArray("[8,\"ping\"]").toString());
+		assertTrue(waitForMessage((a) -> a.optInt(0) == 8 && "pong".equals(a.optString(1)), messagesOne));
+		wsOne.close();
+
+		// userTwo's WebSocket was force-closed by the eviction — wait for the close to propagate.
+		TimeUtils.waitFor(MAX_WAIT_MS, 1000L, () -> Pair.create(!wsTwo.isOpen(), null));
+
+		// userOne still has UPDATE on all captured benefactors and can join the session.
+		GridReplica replicaOneAfterSync = gridService
+				.createReplica(userOne.getId(), new CreateReplicaRequest().setGridSessionId(session.getSessionId()))
+				.getReplica();
+		assertNotNull(replicaOneAfterSync);
+
+		// userTwo lacks UPDATE on the new file's benefactor, so they lose access after sync.
+		assertThrows(UnauthorizedException.class, () -> gridService
+				.createReplica(userTwo.getId(), new CreateReplicaRequest().setGridSessionId(session.getSessionId())));
+	}
+
 	List<FileEntity> createFiles(int count, String folderId, String fileHandleId) {
 		List<FileEntity> files = new ArrayList<>();
 		for (int i = 0; i < count; i++) {
@@ -1075,17 +1331,109 @@ public class GridEventBrokerWorkerIntegrationTest {
 			rowsView.stream().map(r -> r.getRowObject().getData().getRowJsonDocument().toString()).collect(Collectors.toList())
 		);
 	}
+	
+	@Test
+	public void testRecordSetImportArray() throws Exception {
+		Project project = entityService.createEntity(admin.getId(), new Project().setName("RecordSetImportArray"),
+				null);
 
+		String initialCsv = "id,name\n1,Alice\n2,Bob\n3,Charlie\n";
+		S3FileHandle fileHandle = fileHandleManager.createFileFromByteArray(admin.getId().toString(), new Date(),
+				initialCsv.getBytes(StandardCharsets.UTF_8), "initial.csv", ContentType.create("text/csv"), null);
+
+		RecordSet recordSet = entityService.createEntity(admin.getId(),
+				new RecordSet().setParentId(project.getId()).setName("recordSet")
+						.setDataFileHandleId(fileHandle.getId()).setUpsertKey(List.of("id")),
+				null);
+
+		GridSession session = asynchronousJobWorkerHelper.assertJobResponse(admin,
+				new CreateGridRequest().setRecordSetId(recordSet.getId()), (CreateGridResponse response) -> {
+					assertNotNull(response);
+					assertNotNull(response.getGridSession());
+				}, MAX_WAIT_MS).getResponse().getGridSession();
+
+		assertEquals(recordSet.getId(), session.getSourceEntityId());
+
+		List<ColumnModel> importSchema = List.of(
+				new ColumnModel().setName("id").setColumnType(ColumnType.INTEGER),
+				new ColumnModel().setName("name").setColumnType(ColumnType.STRING));
+		CsvTableDescriptor csvDescriptor = new CsvTableDescriptor().setIsFirstLineHeader(true);
+
+		String uploadCsv = "id,name\n1,Alice_updated\n4,Dave\n";
+		S3FileHandle uploadFileHandle = fileHandleManager.createFileFromByteArray(admin.getId().toString(), new Date(),
+				uploadCsv.getBytes(StandardCharsets.UTF_8), "upload.csv", ContentType.create("text/csv"), null);
+
+		// Admin runs an import to verify the basic import works
+		GridCsvImportResponse importResults = asynchronousJobWorkerHelper.assertJobResponse(admin,
+				new GridCsvImportRequest().setSessionId(session.getSessionId()).setCsvDescriptor(csvDescriptor)
+						.setFileHandleId(uploadFileHandle.getId()).setSchema(importSchema),
+				(GridCsvImportResponse response) -> assertNotNull(response), MAX_WAIT_MS).getResponse();
+
+		assertNotNull(importResults);
+
+		// Reproduce PLFM-9571: a team member submits a CSV import for a session created by a different team member.
+		// The import publishes under a per-user IMPORT connection, created on first use via
+		// GridManager#getOrCreateUserConnection, so a different importing user is served without error.
+		UserInfo anotherUser = createUser();
+		Team curatorsTeam = teamManager.create(admin, new Team().setName(UUID.randomUUID().toString()));
+		teamManager.addMember(admin, curatorsTeam.getId(), anotherUser);
+
+		// Grant the team READ+DOWNLOAD+UPDATE on the project so that anotherUser can access the RecordSet
+		aclHelper.update(project.getId(), ObjectType.ENTITY, (a) -> {
+			a.getResourceAccess().add(createResourceAccess(Long.parseLong(curatorsTeam.getId()), ACCESS_TYPE.READ));
+			a.getResourceAccess().add(createResourceAccess(Long.parseLong(curatorsTeam.getId()), ACCESS_TYPE.DOWNLOAD));
+			a.getResourceAccess().add(createResourceAccess(Long.parseLong(curatorsTeam.getId()), ACCESS_TYPE.UPDATE));
+		});
+
+		// Create a new session owned by the team (admin creates the session)
+		GridSession teamSession = asynchronousJobWorkerHelper.assertJobResponse(admin,
+				new CreateGridRequest().setRecordSetId(recordSet.getId()).setOwnerPrincipalId(curatorsTeam.getId()),
+				(CreateGridResponse response) -> {
+					assertNotNull(response);
+					assertNotNull(response.getGridSession());
+				}, MAX_WAIT_MS).getResponse().getGridSession();
+
+		// anotherUser creates their own file handle to upload
+		S3FileHandle anotherUserFileHandle = fileHandleManager.createFileFromByteArray(
+				anotherUser.getId().toString(), new Date(),
+				uploadCsv.getBytes(StandardCharsets.UTF_8), "upload.csv", ContentType.create("text/csv"), null);
+
+		// anotherUser submits the import — this is the cross-user scenario that caused PLFM-9571
+		importResults = asynchronousJobWorkerHelper.assertJobResponse(
+				anotherUser, new GridCsvImportRequest().setSessionId(teamSession.getSessionId())
+						.setCsvDescriptor(csvDescriptor).setFileHandleId(anotherUserFileHandle.getId())
+						.setSchema(importSchema),
+				(GridCsvImportResponse response) -> assertNotNull(response), MAX_WAIT_MS).getResponse();
+
+		assertNotNull(importResults);
+
+		// anotherUser also submits the export — verifies the cross-user export scenario (PLFM-9571)
+		GridRecordSetExportResponse exportResults = asynchronousJobWorkerHelper.assertJobResponse(
+				anotherUser, new GridRecordSetExportRequest().setSessionId(teamSession.getSessionId()),
+				(GridRecordSetExportResponse response) -> {
+					assertNotNull(response);
+					assertEquals(teamSession.getSessionId(), response.getSessionId());
+				}, MAX_WAIT_MS).getResponse();
+
+		assertNotNull(exportResults);
+	}
+	
 	@Test
 	public void testGridWithRecordSetAndArrayColumns() throws Exception {
 		Project project = entityService.createEntity(admin.getId(), new Project().setName("ArrayColumn Test"), null);
 
-		// CSV with plain string values in a column that the JSON schema defines as array
+		// CSV with plain string values in a column that the JSON schema defines as array.
+		// scores_column holds decimals, which the CSV inference types as DOUBLE: a type with
+		// no list equivalent, so the grid keeps the raw value as text rather than failing to
+		// build a DOUBLE_LIST that does not exist (PLFM-9945).
+		// refs_column holds entity ids (inferred as ENTITYID) against an array of strings that
+		// declares no maxLength, so the element type carries no size: the column must still be
+		// read as a list rather than degrading to a plain text cell (PLFM-9945).
 		String csvContent =
-			"id_column,tags_column,name_column" + System.lineSeparator() +
-			"1,alpha,first"                     + System.lineSeparator() +
-			"2,\"beta, gamma\",second"          + System.lineSeparator() +
-			"3,\"[\"\"delta\"\"]\",third";
+			"id_column,tags_column,name_column,scores_column,refs_column" + System.lineSeparator() +
+			"1,alpha,first,1.5,syn123"                                    + System.lineSeparator() +
+			"2,\"beta, gamma\",second,2.5,syn456"                         + System.lineSeparator() +
+			"3,\"[\"\"delta\"\"]\",third,3.5,syn789";
 
 		S3FileHandle fileHandle = fileHandleManager.createFileFromByteArray(admin.getId().toString(), new Date(),
 			csvContent.getBytes(StandardCharsets.UTF_8), "recordset_array.csv", ContentType.create("text/csv"), null);
@@ -1096,11 +1444,13 @@ public class GridEventBrokerWorkerIntegrationTest {
 			.setDataFileHandleId(fileHandle.getId())
 			.setUpsertKey(List.of("id_column")), null);
 
-		// Schema with tags_column as array type
+		// Schema with tags_column, scores_column and refs_column as array types
 		String schemaId = createJsonSchema(Map.of(
 			"id_column", new JsonSchema().setType(Type.integer),
 			"tags_column", new JsonSchema().setType(Type.array).setItems(new JsonSchema().setType(Type.string)),
-			"name_column", new JsonSchema().setType(Type.string)
+			"name_column", new JsonSchema().setType(Type.string),
+			"scores_column", new JsonSchema().setType(Type.array).setItems(new JsonSchema().setType(Type.number)),
+			"refs_column", new JsonSchema().setType(Type.array).setItems(new JsonSchema().setType(Type.string))
 		), List.of("id_column", "name_column")).getNewVersionInfo().get$id();
 
 		entityService.bindSchemaToEntity(admin.getId(),
@@ -1120,7 +1470,7 @@ public class GridEventBrokerWorkerIntegrationTest {
 		);
 
 		assertEquals(
-			List.of("id_column", "tags_column", "name_column"),
+			List.of("id_column", "tags_column", "name_column", "scores_column", "refs_column"),
 			header.getOrderedColumns().stream().map(Column::getName).collect(Collectors.toList())
 		);
 
@@ -1136,26 +1486,29 @@ public class GridEventBrokerWorkerIntegrationTest {
 			);
 		});
 
-		// Verify that plain strings were coerced to arrays
+		// Verify that plain strings and entity ids were coerced to arrays, while the decimals
+		// of the scores_column are carried through as text
 		assertEquals(
 			List.of(
-				"{\"id_column\":1,\"tags_column\":[\"alpha\"],\"name_column\":\"first\"}",
-				"{\"id_column\":2,\"tags_column\":[\"beta\",\"gamma\"],\"name_column\":\"second\"}",
-				"{\"id_column\":3,\"tags_column\":[\"delta\"],\"name_column\":\"third\"}"
+				"{\"id_column\":1,\"tags_column\":[\"alpha\"],\"name_column\":\"first\",\"scores_column\":\"1.5\",\"refs_column\":[\"syn123\"]}",
+				"{\"id_column\":2,\"tags_column\":[\"beta\",\"gamma\"],\"name_column\":\"second\",\"scores_column\":\"2.5\",\"refs_column\":[\"syn456\"]}",
+				"{\"id_column\":3,\"tags_column\":[\"delta\"],\"name_column\":\"third\",\"scores_column\":\"3.5\",\"refs_column\":[\"syn789\"]}"
 			),
 			rowsView.stream().map(r -> r.getRowObject().getData().getRowJsonDocument().toString()).collect(Collectors.toList())
 		);
 
 		// Now test CSV import path — exercises GridCsvImporterImpl + CsvSchemaReconciler
 		String upsertCsvContent =
-			"id_column,tags_column,name_column" + System.lineSeparator() +
-			"1,updated_alpha,first_updated"     + System.lineSeparator() +
-			"4,\"new_a, new_b\",fourth";
+			"id_column,tags_column,name_column,scores_column,refs_column" + System.lineSeparator() +
+			"1,updated_alpha,first_updated,1.75,syn999"                    + System.lineSeparator() +
+			"4,\"new_a, new_b\",fourth,4.5,syn111";
 
 		S3FileHandle upsertFileHandle = fileHandleManager.createFileFromByteArray(admin.getId().toString(), new Date(),
 			upsertCsvContent.getBytes(StandardCharsets.UTF_8), "recordset_array_upsert.csv", ContentType.create("text/csv"), null);
 
-		// Note: schema uses STRING for tags_column — the reconciler should upgrade to STRING_LIST
+		// Note: schema uses STRING for tags_column and ENTITYID for refs_column — the reconciler
+		// should upgrade both to STRING_LIST — and DOUBLE for scores_column, which the reconciler
+		// keeps as text since the JSON schema declares an array and DOUBLE has no list equivalent
 		GridCsvImportRequest csvImportRequest = new GridCsvImportRequest()
 			.setSessionId(session.getSessionId())
 			.setFileHandleId(upsertFileHandle.getId())
@@ -1163,7 +1516,9 @@ public class GridEventBrokerWorkerIntegrationTest {
 			.setSchema(List.of(
 				new ColumnModel().setName("id_column").setColumnType(ColumnType.INTEGER),
 				new ColumnModel().setName("tags_column").setColumnType(ColumnType.STRING),
-				new ColumnModel().setName("name_column").setColumnType(ColumnType.STRING)
+				new ColumnModel().setName("name_column").setColumnType(ColumnType.STRING),
+				new ColumnModel().setName("scores_column").setColumnType(ColumnType.DOUBLE),
+				new ColumnModel().setName("refs_column").setColumnType(ColumnType.ENTITYID)
 			));
 
 		asynchronousJobWorkerHelper.assertJobResponse(admin, csvImportRequest, (GridCsvImportResponse response) -> {
@@ -1186,21 +1541,226 @@ public class GridEventBrokerWorkerIntegrationTest {
 
 		assertEquals(
 			List.of(
-				"{\"id_column\":1,\"tags_column\":[\"updated_alpha\"],\"name_column\":\"first_updated\"}",
-				"{\"id_column\":2,\"tags_column\":[\"beta\",\"gamma\"],\"name_column\":\"second\"}",
-				"{\"id_column\":3,\"tags_column\":[\"delta\"],\"name_column\":\"third\"}",
-				"{\"id_column\":4,\"tags_column\":[\"new_a\",\"new_b\"],\"name_column\":\"fourth\"}"
+				"{\"id_column\":1,\"tags_column\":[\"updated_alpha\"],\"name_column\":\"first_updated\",\"scores_column\":\"1.75\",\"refs_column\":[\"syn999\"]}",
+				"{\"id_column\":2,\"tags_column\":[\"beta\",\"gamma\"],\"name_column\":\"second\",\"scores_column\":\"2.5\",\"refs_column\":[\"syn456\"]}",
+				"{\"id_column\":3,\"tags_column\":[\"delta\"],\"name_column\":\"third\",\"scores_column\":\"3.5\",\"refs_column\":[\"syn789\"]}",
+				"{\"id_column\":4,\"tags_column\":[\"new_a\",\"new_b\"],\"name_column\":\"fourth\",\"scores_column\":\"4.5\",\"refs_column\":[\"syn111\"]}"
 			),
 			rowsView.stream().map(r -> r.getRowObject().getData().getRowJsonDocument().toString()).collect(Collectors.toList())
 		);
 	}
 
+	@Test
+	public void testGridWithRecordSetAndSchemaTypedColumns() throws Exception {
+		Project project = entityService.createEntity(admin.getId(), new Project().setName("SchemaTypedColumn Test"),
+			null);
+
+		// entity_id_column and code_column are the two the CSV type inference reads as something
+		// narrower than the bound JSON schema declares (PLFM-9945): entity ids (ENTITYID) and
+		// integers (INTEGER) respectively, while the schema declares both as strings.
+		// entity_id_column is also the upsert key, so its reconciled type is what the CSV import
+		// stages the key in. label_column already infers as a string and is here to show a column
+		// the reconciler leaves alone.
+		String csvContent =
+			"entity_id_column,code_column,label_column" + System.lineSeparator() +
+			"syn1,001,alpha"                            + System.lineSeparator() +
+			"syn2,002,beta"                             + System.lineSeparator() +
+			"syn3,003,gamma";
+
+		S3FileHandle fileHandle = fileHandleManager.createFileFromByteArray(admin.getId().toString(), new Date(),
+			csvContent.getBytes(StandardCharsets.UTF_8), "recordset_typed.csv", ContentType.create("text/csv"), null);
+
+		RecordSet recordSet = entityService.createEntity(admin.getId(), new RecordSet()
+			.setParentId(project.getId())
+			.setName("typedRecordSet")
+			.setDataFileHandleId(fileHandle.getId())
+			.setUpsertKey(List.of("entity_id_column")), null);
+
+		String schemaId = createJsonSchema(Map.of(
+			"entity_id_column", new JsonSchema().setType(Type.string),
+			"code_column", new JsonSchema().setType(Type.string).setMaxLength(10L),
+			"label_column", new JsonSchema().setType(Type.string).setMaxLength(20L)
+		), List.of("entity_id_column")).getNewVersionInfo().get$id();
+
+		entityService.bindSchemaToEntity(admin.getId(),
+			new BindSchemaToEntityRequest().setEntityId(recordSet.getId()).setSchema$id(schemaId));
+
+		GridSession session = asynchronousJobWorkerHelper.assertJobResponse(admin,
+			new CreateGridRequest().setRecordSetId(recordSet.getId()), (CreateGridResponse response) -> {
+				assertNotNull(response);
+				assertNotNull(response.getGridSession());
+			}, MAX_WAIT_MS).getResponse().getGridSession();
+
+		GridHeader header = TimeUtils.waitFor(MAX_WAIT_MS, 1000L, () ->
+			gridViewManager.readHeader(session.getSessionId(), INTERNAL_REPLICA_ID)
+				.map(h -> Pair.create(true, h))
+				.orElse(Pair.create(false, null))
+		);
+
+		assertEquals(
+			List.of("entity_id_column", "code_column", "label_column"),
+			header.getOrderedColumns().stream().map(Column::getName).collect(Collectors.toList())
+		);
+
+		// Every row must be valid against the bound schema: a cell typed from the CSV alone
+		// would hold code_column as a number, which the schema's "string" type rejects
+		List<RowView> rowsView = TimeUtils.waitFor(MAX_WAIT_MS, 1000L, () -> {
+			List<RowView> page = gridViewManager.querySinglePage(header, 100L, 0L);
+			if (page.size() != 3) {
+				return Pair.create(false, page);
+			}
+			return Pair.create(
+				page.stream().allMatch(r -> new ValidationResults().setIsValid(true).equals(r.getRowValidationResults())),
+				page
+			);
+		});
+
+		// The values are held as the schema declares them: "001" keeps its leading zeros
+		// instead of collapsing to the number 1
+		assertEquals(
+			List.of(
+				"{\"entity_id_column\":\"syn1\",\"code_column\":\"001\",\"label_column\":\"alpha\"}",
+				"{\"entity_id_column\":\"syn2\",\"code_column\":\"002\",\"label_column\":\"beta\"}",
+				"{\"entity_id_column\":\"syn3\",\"code_column\":\"003\",\"label_column\":\"gamma\"}"
+			),
+			rowsView.stream().map(r -> r.getRowObject().getData().getRowJsonDocument().toString()).collect(Collectors.toList())
+		);
+
+		// Now import a CSV with the types a client infers from the file, which the reconciler
+		// must again resolve against the bound schema. The ENTITYID upsert key matters here:
+		// the import stages each key in a temporary table column of that type, and an entity id
+		// cannot be staged in the numeric column an ENTITYID key maps to.
+		String upsertCsvContent =
+			"entity_id_column,code_column,label_column" + System.lineSeparator() +
+			"syn1,007,alpha_updated"                    + System.lineSeparator() +
+			"syn4,004,delta";
+
+		S3FileHandle upsertFileHandle = fileHandleManager.createFileFromByteArray(admin.getId().toString(), new Date(),
+			upsertCsvContent.getBytes(StandardCharsets.UTF_8), "recordset_typed_upsert.csv",
+			ContentType.create("text/csv"), null);
+
+		GridCsvImportRequest csvImportRequest = new GridCsvImportRequest()
+			.setSessionId(session.getSessionId())
+			.setFileHandleId(upsertFileHandle.getId())
+			.setCsvDescriptor(new CsvTableDescriptor().setIsFirstLineHeader(true))
+			.setSchema(List.of(
+				new ColumnModel().setName("entity_id_column").setColumnType(ColumnType.ENTITYID),
+				new ColumnModel().setName("code_column").setColumnType(ColumnType.INTEGER),
+				new ColumnModel().setName("label_column").setColumnType(ColumnType.STRING).setMaximumSize(20L)
+			));
+
+		asynchronousJobWorkerHelper.assertJobResponse(admin, csvImportRequest, (GridCsvImportResponse response) -> {
+			assertEquals(session.getSessionId(), response.getSessionId());
+			assertEquals(2, response.getTotalCount());
+			assertEquals(1, response.getUpdatedCount());
+			assertEquals(1, response.getCreatedCount());
+		}, MAX_WAIT_MS).getResponse();
+
+		rowsView = TimeUtils.waitFor(MAX_WAIT_MS, 1000L, () -> {
+			List<RowView> page = gridViewManager.querySinglePage(header, 100L, 0L);
+			if (page.size() != 4) {
+				return Pair.create(false, page);
+			}
+			return Pair.create(
+				page.stream().allMatch(r -> new ValidationResults().setIsValid(true).equals(r.getRowValidationResults())),
+				page
+			);
+		});
+
+		assertEquals(
+			List.of(
+				"{\"entity_id_column\":\"syn1\",\"code_column\":\"007\",\"label_column\":\"alpha_updated\"}",
+				"{\"entity_id_column\":\"syn2\",\"code_column\":\"002\",\"label_column\":\"beta\"}",
+				"{\"entity_id_column\":\"syn3\",\"code_column\":\"003\",\"label_column\":\"gamma\"}",
+				"{\"entity_id_column\":\"syn4\",\"code_column\":\"004\",\"label_column\":\"delta\"}"
+			),
+			rowsView.stream().map(r -> r.getRowObject().getData().getRowJsonDocument().toString()).collect(Collectors.toList())
+		);
+	}
+
+	@Test
+	public void testGridWithRecordSetAndEntityIdColumnDeclaredAsInteger() throws Exception {
+		Project project = entityService.createEntity(admin.getId(),
+			new Project().setName("EntityIdAsInteger Test"), null);
+
+		// ref_column holds entity ids that its schema property declares as integers, so the data
+		// contradicts the schema. Reading the column as the declared integer would fail on
+		// "syn123" and take the whole grid down with it, so the values are read as the entity ids
+		// they are and the conflict is left to row validation for a user to resolve (PLFM-9945).
+		String csvContent =
+			"id_column,ref_column" + System.lineSeparator() +
+			"1,syn123"             + System.lineSeparator() +
+			"2,syn456";
+
+		S3FileHandle fileHandle = fileHandleManager.createFileFromByteArray(admin.getId().toString(), new Date(),
+			csvContent.getBytes(StandardCharsets.UTF_8), "recordset_ref.csv", ContentType.create("text/csv"), null);
+
+		RecordSet recordSet = entityService.createEntity(admin.getId(), new RecordSet()
+			.setParentId(project.getId())
+			.setName("refRecordSet")
+			.setDataFileHandleId(fileHandle.getId())
+			.setUpsertKey(List.of("id_column")), null);
+
+		String schemaId = createJsonSchema(Map.of(
+			"id_column", new JsonSchema().setType(Type.integer),
+			"ref_column", new JsonSchema().setType(Type.integer)
+		), List.of("id_column")).getNewVersionInfo().get$id();
+
+		entityService.bindSchemaToEntity(admin.getId(),
+			new BindSchemaToEntityRequest().setEntityId(recordSet.getId()).setSchema$id(schemaId));
+
+		GridSession session = asynchronousJobWorkerHelper.assertJobResponse(admin,
+			new CreateGridRequest().setRecordSetId(recordSet.getId()), (CreateGridResponse response) -> {
+				assertNotNull(response);
+				assertNotNull(response.getGridSession());
+			}, MAX_WAIT_MS).getResponse().getGridSession();
+
+		GridHeader header = TimeUtils.waitFor(MAX_WAIT_MS, 1000L, () ->
+			gridViewManager.readHeader(session.getSessionId(), INTERNAL_REPLICA_ID)
+				.map(h -> Pair.create(true, h))
+				.orElse(Pair.create(false, null))
+		);
+
+		List<RowView> rowsView = TimeUtils.waitFor(MAX_WAIT_MS, 1000L, () -> {
+			List<RowView> page = gridViewManager.querySinglePage(header,
+				new QueryElement().setIncludeValidationMessages(true));
+			if (page.size() != 2) {
+				return Pair.create(false, page);
+			}
+			return Pair.create(
+				page.stream().allMatch(r -> r.getRowValidationResults() != null),
+				page
+			);
+		});
+
+		assertEquals(
+			List.of(
+				"{\"id_column\":1,\"ref_column\":\"syn123\"}",
+				"{\"id_column\":2,\"ref_column\":\"syn456\"}"
+			),
+			rowsView.stream().map(r -> r.getRowObject().getData().getRowJsonDocument().toString()).collect(Collectors.toList())
+		);
+
+		// Each row is reported as invalid for the one right reason: the entity id read into
+		// ref_column is not the integer that property declares
+		ValidationResults expectedValidation = new ValidationResults().setIsValid(false)
+			.setAllValidationMessages(List.of("#/ref_column: expected type: Integer, found: String"))
+			.setValidationErrorMessage("expected type: Integer, found: String");
+
+		assertEquals(List.of(expectedValidation, expectedValidation),
+			rowsView.stream().map(RowView::getRowValidationResults).collect(Collectors.toList()));
+	}
+
+
 	UserInfo createUser(){
 		NewUser newUser = new NewUser();
 		newUser.setEmail(UUID.randomUUID().toString() + "@test.com");
 		newUser.setUserName(UUID.randomUUID().toString());
-		return userManager.createOrGetTestUser(admin, newUser);
+		UserInfo user = userManager.createOrGetTestUser(admin, newUser);
+		certifiedUserManager.setUserCertificationStatus(admin, user.getId(), true);
+		return userManager.getUserInfo(user.getId());
 	}
+	
 	List<String[]> createAndDownloadCsvFromGrid(DownloadFromGridRequest request)
 			throws AsynchJobFailedException, IOException {
 		DownloadFromGridResult downloadFromGridResult = asynchronousJobWorkerHelper

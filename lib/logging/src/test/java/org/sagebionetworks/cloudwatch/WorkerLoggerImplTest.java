@@ -22,7 +22,7 @@ import org.sagebionetworks.repo.model.ObjectType;
 import org.sagebionetworks.repo.model.message.ChangeMessage;
 import org.sagebionetworks.repo.model.message.ChangeType;
 
-import com.amazonaws.services.cloudwatch.model.StandardUnit;
+import software.amazon.awssdk.services.cloudwatch.model.StandardUnit;
 import com.google.common.collect.ImmutableMap;
 
 @ExtendWith(MockitoExtension.class)
@@ -188,7 +188,7 @@ public class WorkerLoggerImplTest {
 		ProfileData expected = new ProfileData();
 		expected.setName(WorkerLogger.METRIC_NAME_WORKER_TIME);
 		expected.setNamespace(WorkerLogger.WORKER_NAMESPACE + " - " + stackInstance);
-		expected.setUnit(StandardUnit.Milliseconds.name());
+		expected.setUnit(StandardUnit.MILLISECONDS.toString());
 		expected.setValue(Double.valueOf(timeMillis));
 		
 		Map<String, String> expectedDimensions = new HashMap<>();
@@ -221,7 +221,7 @@ public class WorkerLoggerImplTest {
 		ProfileData expected = new ProfileData();
 		expected.setName(WorkerLogger.METRIC_NAME_WORKER_TIME);
 		expected.setNamespace(WorkerLogger.WORKER_NAMESPACE + " - " + stackInstance);
-		expected.setUnit(StandardUnit.Milliseconds.name());
+		expected.setUnit(StandardUnit.MILLISECONDS.toString());
 		expected.setValue(Double.valueOf(timeMillis));
 		
 		Map<String, String> expectedDimensions = new HashMap<>();
@@ -253,7 +253,7 @@ public class WorkerLoggerImplTest {
 		ProfileData expected = new ProfileData();
 		expected.setName(WorkerLogger.METRIC_NAME_WORKER_TIME);
 		expected.setNamespace(WorkerLogger.WORKER_NAMESPACE + " - " + stackInstance);
-		expected.setUnit(StandardUnit.Milliseconds.name());
+		expected.setUnit(StandardUnit.MILLISECONDS.toString());
 		expected.setValue(Double.valueOf(timeMillis));
 		
 		Map<String, String> expectedDimensions = new HashMap<>();
@@ -282,31 +282,60 @@ public class WorkerLoggerImplTest {
 		Class<? extends Object> workerClass = WorkerLogger.class; // nonsensical, just for testing
 		long timeMillis = 1000;
 		Map<String, String> dimensions = ImmutableMap.of(WorkerLogger.DIMENSION_WORKER_CLASS, "myCustomValue");
-		
+
 		ProfileData expected = new ProfileData();
 		expected.setName(WorkerLogger.METRIC_NAME_WORKER_TIME);
 		expected.setNamespace(WorkerLogger.WORKER_NAMESPACE + " - " + stackInstance);
-		expected.setUnit(StandardUnit.Milliseconds.name());
+		expected.setUnit(StandardUnit.MILLISECONDS.toString());
 		expected.setValue(Double.valueOf(timeMillis));
-		
+
 		Map<String, String> expectedDimensions = new HashMap<>();
-		
+
 		expectedDimensions.putAll(dimensions);
 		expectedDimensions.put(WorkerLogger.DIMENSION_WORKER_CLASS, workerClass.getSimpleName());
-		
+
 		expected.setDimension(expectedDimensions);
-		
+
 		// Call under test
 		logger.logWorkerTimeMetric(workerClass, timeMillis, dimensions);
 
 		verify(mockConsumer).addProfileData(dataCaptor.capture());
-		
+
 		ProfileData result = dataCaptor.getValue();
-		
+
 		assertNotNull(result.getTimestamp());
-		
+
 		expected.setTimestamp(result.getTimestamp());
 		assertEquals(expected, result);
 	}
-	
+
+	@Test
+	public void testLogWorkerGaugeMetric() {
+
+		Class<? extends Object> workerClass = WorkerLogger.class; // nonsensical, just for testing
+		String metricName = "SomeGaugeMetric";
+		double value = 12345.0;
+
+		ProfileData expected = new ProfileData();
+		expected.setName(metricName);
+		expected.setNamespace(WorkerLogger.WORKER_NAMESPACE + " - " + stackInstance);
+		expected.setUnit(StandardUnit.COUNT.toString());
+		expected.setValue(value);
+		expected.setDimension(ImmutableMap.of(
+				WorkerLogger.DIMENSION_WORKER_CLASS, workerClass.getSimpleName()
+		));
+
+		// Call under test
+		logger.logWorkerGaugeMetric(workerClass, metricName, value);
+
+		verify(mockConsumer).addProfileData(dataCaptor.capture());
+
+		ProfileData result = dataCaptor.getValue();
+
+		assertNotNull(result.getTimestamp());
+
+		expected.setTimestamp(result.getTimestamp());
+		assertEquals(expected, result);
+	}
+
 }

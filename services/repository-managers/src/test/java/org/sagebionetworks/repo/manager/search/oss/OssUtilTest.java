@@ -16,6 +16,7 @@ import org.opensearch.client.opensearch._types.aggregations.Aggregate;
 import org.opensearch.client.opensearch._types.aggregations.Aggregation;
 import org.opensearch.client.opensearch._types.aggregations.FiltersBucket;
 import org.opensearch.client.opensearch._types.aggregations.LongTermsBucket;
+import org.opensearch.client.opensearch._types.aggregations.LongTermsBucketKey;
 import org.opensearch.client.opensearch._types.aggregations.StringTermsBucket;
 import org.opensearch.client.opensearch._types.query_dsl.BoolQuery;
 import org.opensearch.client.opensearch._types.query_dsl.Query;
@@ -29,6 +30,7 @@ import org.opensearch.client.opensearch.core.search.Suggest;
 import org.opensearch.client.opensearch.core.search.TermSuggest;
 import org.opensearch.client.opensearch.core.search.TermSuggestOption;
 import org.opensearch.client.opensearch.core.search.TotalHitsRelation;
+import org.sagebionetworks.repo.model.AuthorizationConstants;
 import org.sagebionetworks.repo.model.UserInfo;
 import org.sagebionetworks.repo.model.search.DocumentFields;
 import org.sagebionetworks.repo.model.search.Facet;
@@ -126,9 +128,8 @@ public class OssUtilTest {
 
         //searchResponse = new SearchResponse<DocumentFields>();
 
-        userInfo = new UserInfo(false);
         userGroups = List.of(123L, 456L, 789L);
-        userInfo.setGroups(Sets.newLinkedHashSet(userGroups));
+        userInfo = new UserInfo(false, 1L, AuthorizationConstants.DEFAULT_REALM_ID, Sets.newLinkedHashSet(userGroups));
 
         keyRangeList = new ArrayList<>();
         keyRange = new KeyRange();
@@ -224,7 +225,7 @@ public class OssUtilTest {
         SearchRequest expectedRequest = expectedSearchRequestBaseNoQueryTermSet.build();
 
         //call under test
-        SearchRequest request = OssUtil.generateSearchRequest(new UserInfo(true), query.setQueryTerm(q));
+        SearchRequest request = OssUtil.generateSearchRequest(new UserInfo(true, 1L, AuthorizationConstants.DEFAULT_REALM_ID), query.setQueryTerm(q));
         assertEquals(1, request.query().bool().must().size());
         assertEquals(0, request.query().bool().filter().size());
 
@@ -239,8 +240,8 @@ public class OssUtilTest {
         SuggestionList suggestionList = new SuggestionList()
                 .setKey("term1")
                 .setValues(new HashSet<>(List.of(
-                       new Suggestion().setTerm("allowed"),
-                       new Suggestion().setTerm("denied")
+                        new Suggestion().setTerm("allowed"),
+                        new Suggestion().setTerm("denied")
                 )));
         SuggestionResults suggestionResults = new SuggestionResults().setSuggestions(List.of(suggestionList));
 
@@ -264,7 +265,7 @@ public class OssUtilTest {
         SuggestionList suggestionList = new SuggestionList()
                 .setKey("term1")
                 .setValues(new HashSet<>(List.of(
-                       new Suggestion().setTerm("denied")
+                        new Suggestion().setTerm("denied")
                 )));
         SuggestionResults suggestionResults = new SuggestionResults().setSuggestions(List.of(suggestionList));
 
@@ -283,8 +284,8 @@ public class OssUtilTest {
         SuggestionList suggestionList = new SuggestionList()
                 .setKey("term1")
                 .setValues(new HashSet<>(List.of(
-                       new Suggestion().setTerm("a"),
-                       new Suggestion().setTerm("b")
+                        new Suggestion().setTerm("a"),
+                        new Suggestion().setTerm("b")
                 )));
         FiltersBucket bucketA = FiltersBucket.of(b -> b.docCount(2L));
         FiltersBucket bucketB = FiltersBucket.of(b -> b.docCount(3L));
@@ -357,10 +358,10 @@ public class OssUtilTest {
     @Test
     public void testEliminateSuggestionWithAccessDeniedHandlesMultipleBucketsWithMixedDocCounts() {
         SuggestionList suggestionList = new SuggestionList().setKey("disease").setValues(new HashSet<>(List.of(
-               new Suggestion().setTerm("cancer"),
-               new Suggestion().setTerm("tumor"),
-               new Suggestion().setTerm("leukemia"),
-               new Suggestion().setTerm("unknown")
+                new Suggestion().setTerm("cancer"),
+                new Suggestion().setTerm("tumor"),
+                new Suggestion().setTerm("leukemia"),
+                new Suggestion().setTerm("unknown")
         )));
         Map<String, FiltersBucket> filteredBucketMap = new HashMap<>();
         filteredBucketMap.put("cancer", FiltersBucket.of(b -> b.docCount(5L)));
@@ -392,8 +393,8 @@ public class OssUtilTest {
     @Test
     public void eliminateSuggestionWithAccessDeniedHandlesEmptyFilteredBucketMap() {
         SuggestionList suggestionList = new SuggestionList().setKey("disease").setValues(new HashSet<>(List.of(
-               new Suggestion().setTerm("cancer"),
-               new Suggestion().setTerm("tumor")
+                new Suggestion().setTerm("cancer"),
+                new Suggestion().setTerm("tumor")
         )));
         Map<String, FiltersBucket> filteredBucketMap = Collections.emptyMap();
         Aggregate aggregate = Aggregate.of(a -> a.filters(f -> f.buckets(b -> b.keyed(filteredBucketMap))));
@@ -713,8 +714,8 @@ public class OssUtilTest {
     @Test
     void testAuthorizedUserAndSuggestionsPresent() {
         SuggestionList suggestionList = new SuggestionList().setKey("disease").setValues(new HashSet<>(List.of(
-               new Suggestion().setTerm("cancer"),
-               new Suggestion().setTerm("tumor")
+                new Suggestion().setTerm("cancer"),
+                new Suggestion().setTerm("tumor")
         )));
         SuggestionResults suggestionResults = new SuggestionResults().setSuggestions(List.of(suggestionList));
 
@@ -744,12 +745,12 @@ public class OssUtilTest {
     @Test
     void testAdminUserAndSuggestionsPresent() {
         SuggestionList suggestionList = new SuggestionList().setKey("disease").setValues(new HashSet<>(List.of(
-               new Suggestion().setTerm("cancer"),
-               new Suggestion().setTerm("tumor")
+                new Suggestion().setTerm("cancer"),
+                new Suggestion().setTerm("tumor")
         )));
         SuggestionResults suggestionResults = new SuggestionResults().setSuggestions(List.of(suggestionList));
 
-        UserInfo userInfo = new UserInfo(true);
+        UserInfo userInfo = new UserInfo(true, 1L, AuthorizationConstants.DEFAULT_REALM_ID);
         //call under test
         SearchRequest request = OssUtil.generateAggregationRequestToLimitAccess(userInfo, suggestionResults);
 
@@ -1040,17 +1041,17 @@ public class OssUtilTest {
         String nodeBucketKey = "project";
         String createdOnBucketKey = "1234567";
         SearchResponse<DocumentFields> response = SearchResponse.searchResponseOf(res -> res.documents(document)
-                .shards(shard -> shard.total(1).failed(0l).successful(1l))
+                .shards(shard -> shard.total(1).failed(0).successful(1))
                 .aggregations(Map.of(nodeType, Aggregate.of(a -> a
                                         .sterms(terms -> terms
                                                 .buckets(buckets -> buckets.array(Arrays.asList(
                                                         StringTermsBucket.of(b -> b.key(nodeBucketKey).docCount(100L))
-                                                ))).sumOtherDocCount(0))),
+                                                ))).sumOtherDocCount(0L))),
                                 createdON, Aggregate.of(a -> a
                                         .lterms(terms -> terms
                                                 .buckets(buckets -> buckets.array(Arrays.asList(
-                                                        LongTermsBucket.of(b -> b.key(createdOnBucketKey).docCount(100L))
-                                                ))).sumOtherDocCount(0)))
+                                                        LongTermsBucket.of(b -> b.key(LongTermsBucketKey.of(k -> k.signed(Long.parseLong(createdOnBucketKey)))).keyAsString(createdOnBucketKey).docCount(100L))
+                                                ))).sumOtherDocCount(0L)))
                         )
                 )
                 .timedOut(false).took(10).hits(hh -> hh.hits(ht -> ht.source(document).id("id")

@@ -4,7 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anySetOf;
+import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -28,9 +28,9 @@ import org.mockito.Mock;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.mockito.stubbing.Answer;
-import org.sagebionetworks.repo.manager.AuthorizationManager;
 import org.sagebionetworks.repo.model.ACCESS_TYPE;
 import org.sagebionetworks.repo.model.AccessControlListDAO;
+import org.sagebionetworks.repo.model.AuthorizationConstants;
 import org.sagebionetworks.repo.model.NextPageToken;
 import org.sagebionetworks.repo.model.ObjectType;
 import org.sagebionetworks.repo.model.UnauthorizedException;
@@ -38,7 +38,6 @@ import org.sagebionetworks.repo.model.UserInfo;
 import org.sagebionetworks.repo.model.auth.AuthorizationStatus;
 import org.sagebionetworks.repo.model.dao.subscription.SubscriptionDAO;
 import org.sagebionetworks.repo.model.dao.subscription.SubscriptionListRequest;
-import org.sagebionetworks.repo.model.dbo.dao.DBOChangeDAO;
 import org.sagebionetworks.repo.model.subscription.SortByType;
 import org.sagebionetworks.repo.model.subscription.SortDirection;
 import org.sagebionetworks.repo.model.subscription.SubscriberCount;
@@ -57,9 +56,7 @@ import com.google.common.collect.Sets;
 public class SubscriptionManagerImplTest {
 
 	@Mock
-	private AuthorizationManager mockAuthorizationManager;
-	@Mock
-	private DBOChangeDAO mockChangeDao;
+	private SubscriptionAndDiscussionAuthorizationManager mockAuthorizationManager;
 	@Mock
 	private SubscriptionDAO mockDao;
 	@Mock
@@ -86,11 +83,9 @@ public class SubscriptionManagerImplTest {
 		topic.setObjectType(SubscriptionObjectType.FORUM);
 		userId = 2L;
 		anotherUser = 4L;
-		userInfo = new UserInfo(false);
-		userInfo.setId(userId);
 		Set<Long> groups = new HashSet<Long>();
 		groups.add(userId);
-		userInfo.setGroups(groups);
+		userInfo = new UserInfo(false, userId, AuthorizationConstants.DEFAULT_REALM_ID, groups);
 		sub = new Subscription();
 		sub.setObjectId(objectId);
 		
@@ -101,7 +96,7 @@ public class SubscriptionManagerImplTest {
 				// return the benefactors unmodified.
 				return (Set<Long>) invocation.getArguments()[1];
 			}
-		}).when(mockAclDao).getAccessibleBenefactors(anySetOf(Long.class), anySetOf(Long.class), any(ObjectType.class),
+		}).when(mockAclDao).getAccessibleBenefactors(anySet(), anySet(), any(ObjectType.class),
 				any(ACCESS_TYPE.class));
 		
 		projectIds = Sets.newHashSet(123L,456L);

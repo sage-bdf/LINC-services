@@ -1,5 +1,6 @@
 package org.sagebionetworks.repo.model.dbo.curation;
 
+import java.util.Date;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -24,8 +25,15 @@ public interface CurationTaskDao {
 
     TaskStatus updateTaskStatus(Long userId, Long taskId, TaskStatus statusUpdate);
 
+    /**
+     * Clears the activeSessionId from the execution details of the given task, if execution details exist.
+     * Must be called within an existing write transaction.
+     */
+    void clearActiveSessionId(Long taskId);
+
     List<TaskBundle> getCurationTaskBundles(List<Long> projectIds, List<Long> assigneeIds,
-            List<TaskState> stateFilter, long limit, long offset);
+            List<TaskState> stateFilter, List<Long> taskIds, Date dueDateStart, Date dueDateEnd,
+            boolean includeUnsetDueDate, long limit, long offset);
 
     Set<Long> getDistinctProjectIds();
 

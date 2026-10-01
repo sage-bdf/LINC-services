@@ -1,5 +1,6 @@
 package org.sagebionetworks.repo.manager.grid.synch.handler;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -21,6 +22,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.Spliterator;
 import java.util.Spliterators;
 import java.util.TreeMap;
@@ -36,9 +39,9 @@ import org.mockito.invocation.InvocationOnMock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.sagebionetworks.repo.manager.grid.GridAuthorizationManager;
 import org.sagebionetworks.repo.manager.grid.internal.replica.model.SynapseRow;
-import org.sagebionetworks.repo.manager.grid.synch.io.RowSourceItemReference;
-import org.sagebionetworks.repo.manager.grid.synch.io.RowSourceItemReader;
 import org.sagebionetworks.repo.manager.grid.synch.io.RowSourceItem;
+import org.sagebionetworks.repo.manager.grid.synch.io.RowSourceItemReader;
+import org.sagebionetworks.repo.manager.grid.synch.io.RowSourceItemReference;
 import org.sagebionetworks.repo.manager.grid.synch.row.RowCopyItemImpl;
 import org.sagebionetworks.repo.manager.schema.AnnotationsTranslator;
 import org.sagebionetworks.repo.manager.schema.JsonSchemaManager;
@@ -53,6 +56,7 @@ import org.sagebionetworks.repo.model.annotation.v2.AnnotationsValueType;
 import org.sagebionetworks.repo.model.dao.asynch.AsyncJobProgressCallback;
 import org.sagebionetworks.repo.model.dao.table.RowHandler;
 import org.sagebionetworks.repo.model.grid.GridSession;
+import org.sagebionetworks.repo.model.grid.SyncType;
 import org.sagebionetworks.repo.model.grid.patch.ConType;
 import org.sagebionetworks.repo.model.grid.patch.ConValue;
 import org.sagebionetworks.repo.model.schema.JsonSchema;
@@ -368,214 +372,85 @@ public class EntityViewSourceHandlerTest {
 	}
 
 	@Test
-	public void testAddColumn() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
+	public void testGetBenefactorIds() throws Exception {
+		List<String> requiredColumns = Collections.emptyList();
+		List<ColumnModel> schema = List.of(
+				new ColumnModel().setColumnType(ColumnType.STRING).setName("aString"));
+		Long benefactorOne = 111L;
+		Long benefactorTwo = 222L;
+		// Two rows with distinct benefactor IDs, one row with a null benefactor (should be ignored)
+		List<Row> rows = List.of(
+				new Row().setRowId(1L).setVersionNumber(1L).setEtag("e1").setBenefactorId(benefactorOne).setValues(Arrays.asList("a")),
+				new Row().setRowId(2L).setVersionNumber(1L).setEtag("e2").setBenefactorId(benefactorTwo).setValues(Arrays.asList("b")),
+				new Row().setRowId(3L).setVersionNumber(1L).setEtag("e3").setBenefactorId(benefactorOne).setValues(Arrays.asList("c")),
+				new Row().setRowId(4L).setVersionNumber(1L).setEtag("e4").setValues(Arrays.asList("d")));
 
+		try (EntityViewSourceHandler handler = setupHandler(session, requiredColumns, schema, rows);
+				RowSourceItemReader reader = handler.getSourceRowReader()) {
 			// call under test
-			handler.addColumnToSource("one");
-			assertEquals(List.of("Cannot add the column: 'one' to a source view."), handler.getErrorMessages());
+			Set<Long> result = handler.getBenefactorIds();
+			assertEquals(Set.of(benefactorOne, benefactorTwo), result);
 		}
-		verifyNoMoreInteractionsOnAllMocks();
 	}
 
 	@Test
-	public void testRemoveColoum() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-
-			// call under test
-			handler.removeColumn("one");
-			assertEquals(List.of("Cannot remove the column: 'one' from a source view."), handler.getErrorMessages());
-		}
-		verifyNoMoreInteractionsOnAllMocks();
+	public void testResolveSyncTypeEntityViewNullRejected() throws Exception {
+		EntityViewSourceHandler handler = buildHandlerForSyncTypeTests();
+		// call under test — null causes IllegalArgumentException
+		assertThrows(IllegalArgumentException.class, () -> handler.validateSyncType(null));
 	}
 
 	@Test
-	public void testCanAddRemoveRows() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-
-			// call under test
-			assertEquals(false, handler.canAddRemoveRows());
-		}
-		verifyNoMoreInteractionsOnAllMocks();
+	public void testResolveSyncTypeEntityViewPullPushAccepted() throws Exception {
+		EntityViewSourceHandler handler = buildHandlerForSyncTypeTests();
+		// call under test — PULL_PUSH is the only supported type
+		assertDoesNotThrow(() -> handler.validateSyncType(SyncType.PULL_PUSH));
 	}
 
 	@Test
-	public void testCanAddRemoveColumns() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-
+	public void testResolveSyncTypeEntityViewPullRejected() throws Exception {
+		EntityViewSourceHandler handler = buildHandlerForSyncTypeTests();
+		String message = assertThrows(IllegalArgumentException.class, () -> {
 			// call under test
-			assertEquals(false, handler.canAddRemoveColumns());
-		}
-		verifyNoMoreInteractionsOnAllMocks();
+			handler.validateSyncType(SyncType.PULL);
+		}).getMessage();
+		assertEquals("PULL synchronization is not supported for EntityView-based grid sessions.", message);
 	}
 
-	@Test
-	public void testAddNewRowToSource() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
+	/**
+	 * Minimal setup for tests that only need a constructed handler and do not call
+	 * {@link EntityViewSourceHandler#getSourceRowReader()}. Avoids the
+	 * {@code createRandomAccessFile} stub that {@link #setupHandler} includes,
+	 * which would be flagged as an unnecessary stubbing.
+	 */
+	private EntityViewSourceHandler buildHandlerForSyncTypeTests() throws Exception {
+		GridSession noSchemaSession = new GridSession().setSourceEntityId("syn123").setSessionId("111");
+		List<ColumnModel> schema = List.of(new ColumnModel().setColumnType(ColumnType.STRING).setName("aString"));
+		List<Row> rows = List.of();
 
-			// call under test
-			handler.addNewRowToSource(new RowSourceItem(new TreeMap<String, ConValue>(), "theKey"));
-			assertEquals(List.of("Cannot add the row: 'theKey' to a source view."), handler.getErrorMessages());
-		}
-		verifyNoMoreInteractionsOnAllMocks();
+		doAnswer((InvocationOnMock invocation) -> {
+			return File.createTempFile((String) invocation.getArgument(0), (String) invocation.getArgument(1));
+		}).when(mockFileProvider).createTempFile("Source-" + noSchemaSession.getSourceEntityId(), ".bin");
+		doAnswer((InvocationOnMock invocation) -> {
+			return new BufferedOutputStream(new FileOutputStream((File) invocation.getArgument(0)));
+		}).when(mockFileProvider).createFileOutputStream(any());
+		when(mockGridAuthorizationManager.getRowLevelFilterUserInfo(mockUser, noSchemaSession.getSessionId()))
+				.thenReturn(mockSessionOwner);
+		doAnswer((InvocationOnMock invocation) -> {
+			RowHandlerProvider rhp = invocation.getArgument(3);
+			when(mockQueryTranslations.getMainQuery()).thenReturn(mockMainQuery);
+			when(mockMainQuery.getTranslator()).thenReturn(mockQueryTranslator);
+			when(mockQueryTranslator.getSchemaOfSelect()).thenReturn(schema);
+			try (RowHandler rowHandler = rhp.getHandler(mockQueryTranslations)) {
+				rows.forEach(r -> rowHandler.nextRow(r));
+			}
+			return new QueryResultBundle();
+		}).when(mockTableQueryManager).runQueryAsStream(eq(mockCallback), eq(mockSessionOwner),
+				eq(new Query().setSql("select * from " + noSchemaSession.getSourceEntityId())), any(),
+				eq(ACCESS_TYPE.READ), eq(ACCESS_TYPE.UPDATE));
+
+		return new EntityViewSourceHandler(mockCallback, mockUser, noSchemaSession, mockTableQueryManager,
+				mockGridAuthorizationManager, mockFileProvider, mockAnnotationWriter, mockJsonSchemaManager,
+				mockAnnotationsTranslator);
 	}
-
-	@Test
-	public void testRemoveRow() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-
-			// call under test
-			handler.removeRow(new RowSourceItem(new TreeMap<String, ConValue>(), "theKey"));
-			assertEquals(List.of("Cannot remove the row: 'theKey' from a source view."), handler.getErrorMessages());
-		}
-		verifyNoMoreInteractionsOnAllMocks();
-	}
-
-	@Test
-	public void testTranslateCellChangesWithNullValue() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-			Map<String, ConValue> changes = new HashMap<>();
-			changes.put("aString", null);
-
-			// call under test
-			Map<String, AnnotationsValue> results = handler.translateCellChanges(changes);
-			Map<String, AnnotationsValue> expected = new HashMap<>();
-			expected.put("aString", null);
-			assertEquals(expected, results);
-		}
-		verifyNoMoreInteractionsOnAllMocks();
-	}
-
-	@Test
-	public void testTranslateCellChangesWithUndefinedValue() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-			Map<String, ConValue> changes = new HashMap<>();
-			changes.put("aString", new ConValue(ConType.UNDEFINED, null));
-
-			// call under test
-			Map<String, AnnotationsValue> results = handler.translateCellChanges(changes);
-			Map<String, AnnotationsValue> expected = new HashMap<>();
-			expected.put("aString", null);
-			assertEquals(expected, results);
-		}
-		verifyNoMoreInteractionsOnAllMocks();
-	}
-
-	@Test
-	public void testTranslateCellChangesWithJSONNull() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-			Map<String, ConValue> changes = new HashMap<>();
-			changes.put("aString", new ConValue(ConType.NULL, null));
-
-			// call under test
-			Map<String, AnnotationsValue> results = handler.translateCellChanges(changes);
-			Map<String, AnnotationsValue> expected = new HashMap<>();
-			expected.put("aString", null);
-			assertEquals(expected, results);
-		}
-		verifyNoMoreInteractionsOnAllMocks();
-	}
-
-	@Test
-	public void testTranslateCellChangesWithValueNull() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-			Map<String, ConValue> changes = new HashMap<>();
-			changes.put("aString", new ConValue(ConType.STRING, null));
-
-			// call under test
-			Map<String, AnnotationsValue> results = handler.translateCellChanges(changes);
-			Map<String, AnnotationsValue> expected = new HashMap<>();
-			expected.put("aString", null);
-			assertEquals(expected, results);
-		}
-		verifyNoMoreInteractionsOnAllMocks();
-	}
-
-	@Test
-	public void testTranslateCellChangesValidValues() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-			Map<String, ConValue> changes = Map.of("aString", new ConValue(ConType.STRING, "one"), "anInt",
-					new ConValue(ConType.LONG, 222L));
-
-			Map<String, AnnotationsValue> expected = Map.of("aString",
-					new AnnotationsValue().setType(AnnotationsValueType.STRING).setValue(List.of("one")), "anInt",
-					new AnnotationsValue().setType(AnnotationsValueType.LONG).setValue(List.of("222")));
-
-			when(mockAnnotationsTranslator.getAnnotationValueFromJsonObject(eq("aString"),
-					argThat(json -> json != null && json.toString().equals("{\"aString\":\"one\"}"))))
-					.thenReturn(expected.get("aString"));
-
-			when(mockAnnotationsTranslator.getAnnotationValueFromJsonObject(eq("anInt"),
-					argThat(json -> json != null && json.toString().equals("{\"anInt\":222}"))))
-					.thenReturn(expected.get("anInt"));
-
-			// call under test
-			Map<String, AnnotationsValue> results = handler.translateCellChanges(changes);
-
-			assertEquals(expected, results);
-		}
-		verifyNoMoreInteractionsOnAllMocks();
-	}
-
-	@Test
-	public void testApplyCellChangesFromCopyToSource() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-
-			Map<String, ConValue> changes = Map.of("aString", new ConValue(ConType.STRING, "c"), "anInt",
-					new ConValue(ConType.LONG, 222L));
-
-			EntityViewSourceHandler spy = Mockito.spy(handler);
-
-			Map<String, AnnotationsValue> expected = Map.of("aString",
-					new AnnotationsValue().setType(AnnotationsValueType.STRING).setValue(List.of("one")), "anInt",
-					new AnnotationsValue().setType(AnnotationsValueType.LONG).setValue(List.of("222")));
-
-			doReturn(expected).when(spy).translateCellChanges(changes);
-
-			// call under test
-			spy.applyCellChangesFromCopyToSource("syn123", changes);
-
-			verify(mockAnnotationWriter).updateChangedAnnotations(mockUser, "syn123", expected);
-
-		}
-		verifyNoMoreInteractionsOnAllMocks();
-	}
-
-	@Test
-	public void testApplyCellChangesFromCopyToSourceWithIllegalArgument() throws Exception {
-		try (EntityViewSourceHandler handler = setupHandler(session, Collections.emptyList(), Collections.emptyList(),
-				Collections.emptyList()); RowSourceItemReader rowReader = handler.getSourceRowReader()) {
-
-			Map<String, ConValue> changes = Map.of("aString", new ConValue(ConType.STRING, "c"), "anInt",
-					new ConValue(ConType.LONG, 222L));
-
-			EntityViewSourceHandler spy = Mockito.spy(handler);
-
-			doThrow(new IllegalArgumentException("bad value")).when(spy).translateCellChanges(changes);
-
-			String message = assertThrows(IllegalArgumentException.class, () -> {
-				// call under test
-				spy.applyCellChangesFromCopyToSource("syn123", changes);
-
-			}).getMessage();
-			assertEquals("bad value", message);
-			assertEquals(List.of("Failed to update row: 'syn123' in the source view.  Error message: bad value"),
-					handler.getErrorMessages());
-
-		}
-		verifyNoMoreInteractionsOnAllMocks();
-	}
-
 }

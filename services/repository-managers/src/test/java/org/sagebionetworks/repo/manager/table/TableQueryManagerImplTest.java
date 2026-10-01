@@ -9,14 +9,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
-import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 import static org.sagebionetworks.repo.model.table.QueryOptions.BUNDLE_MASK_QUERY_COLUMN_MODELS;
 import static org.sagebionetworks.repo.model.table.QueryOptions.BUNDLE_MASK_QUERY_COUNT;
@@ -40,6 +41,7 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -61,9 +63,15 @@ import org.sagebionetworks.repo.manager.table.query.QueryExecutor;
 import org.sagebionetworks.repo.manager.table.query.QueryTranslations;
 import org.sagebionetworks.repo.manager.table.query.StreamingQueryExecutor;
 import org.sagebionetworks.repo.manager.table.query.SumFileSizesQuery;
+import org.sagebionetworks.repo.model.AggregateDataConfiguration;
+import org.sagebionetworks.repo.model.AuthorizationConstants;
+import org.sagebionetworks.repo.model.FacetPostProcessingAlgorithm;
+import org.sagebionetworks.repo.model.FacetPostProcessingConfig;
+import org.sagebionetworks.repo.model.FacetRoundingParameters;
 import org.sagebionetworks.repo.model.ObjectType;
 import org.sagebionetworks.repo.model.UnauthorizedException;
 import org.sagebionetworks.repo.model.UserInfo;
+import org.sagebionetworks.repo.model.auth.AuthorizationStatus;
 import org.sagebionetworks.repo.model.dao.table.RowHandler;
 import org.sagebionetworks.repo.model.dao.table.TableType;
 import org.sagebionetworks.repo.model.dbo.dao.table.TableModelTestUtils;
@@ -71,6 +79,8 @@ import org.sagebionetworks.repo.model.dbo.file.download.v2.ActionsRequiredDao;
 import org.sagebionetworks.repo.model.dbo.file.download.v2.EntityActionRequiredCallback;
 import org.sagebionetworks.repo.model.dbo.file.download.v2.FilesBatchProvider;
 import org.sagebionetworks.repo.model.entity.IdAndVersion;
+import org.sagebionetworks.repo.model.table.BenefactorColumn;
+import org.sagebionetworks.repo.model.table.ColumnLineageEntry;
 import org.sagebionetworks.repo.model.table.ColumnModel;
 import org.sagebionetworks.repo.model.table.ColumnMultiValueFunction;
 import org.sagebionetworks.repo.model.table.ColumnMultiValueFunctionQueryFilter;
@@ -79,13 +89,15 @@ import org.sagebionetworks.repo.model.table.ColumnSingleValueQueryFilter;
 import org.sagebionetworks.repo.model.table.ColumnType;
 import org.sagebionetworks.repo.model.table.DownloadFromTableRequest;
 import org.sagebionetworks.repo.model.table.DownloadFromTableResult;
-import org.sagebionetworks.repo.model.table.DownloadPFBRequest;
 import org.sagebionetworks.repo.model.table.FacetColumnRangeRequest;
 import org.sagebionetworks.repo.model.table.FacetColumnRequest;
 import org.sagebionetworks.repo.model.table.FacetColumnResult;
+import org.sagebionetworks.repo.model.table.FacetColumnResultBinnedValues;
 import org.sagebionetworks.repo.model.table.FacetColumnResultRange;
 import org.sagebionetworks.repo.model.table.FacetColumnResultValues;
 import org.sagebionetworks.repo.model.table.FacetType;
+import org.sagebionetworks.repo.model.table.IndexAuthorizationSnapshot;
+import org.sagebionetworks.repo.model.table.IndexDescriptionSnapshot;
 import org.sagebionetworks.repo.model.table.Query;
 import org.sagebionetworks.repo.model.table.QueryBundleRequest;
 import org.sagebionetworks.repo.model.table.QueryOptions;
@@ -96,6 +108,7 @@ import org.sagebionetworks.repo.model.table.RowSet;
 import org.sagebionetworks.repo.model.table.SelectColumn;
 import org.sagebionetworks.repo.model.table.SortDirection;
 import org.sagebionetworks.repo.model.table.SortItem;
+import org.sagebionetworks.repo.model.table.SourceDependency;
 import org.sagebionetworks.repo.model.table.SumFileSizes;
 import org.sagebionetworks.repo.model.table.TableConstants;
 import org.sagebionetworks.repo.model.table.TableFailedException;
@@ -104,15 +117,18 @@ import org.sagebionetworks.repo.model.table.TableStatus;
 import org.sagebionetworks.repo.model.table.TableUnavailableException;
 import org.sagebionetworks.repo.model.table.TextMatchesQueryFilter;
 import org.sagebionetworks.repo.model.table.ViewObjectType;
+import org.sagebionetworks.repo.web.BelowThresholdException;
 import org.sagebionetworks.repo.web.NotFoundException;
 import org.sagebionetworks.table.cluster.CachedQueryRequest;
 import org.sagebionetworks.table.cluster.ConnectionFactory;
 import org.sagebionetworks.table.cluster.QueryTranslator;
 import org.sagebionetworks.table.cluster.SchemaProvider;
 import org.sagebionetworks.table.cluster.TableIndexDAO;
+import org.sagebionetworks.table.cluster.description.BenefactorDescription;
 import org.sagebionetworks.table.cluster.description.IndexDescription;
 import org.sagebionetworks.table.cluster.description.MaterializedViewIndexDescription;
-import org.sagebionetworks.table.cluster.description.TableDependency;
+import org.sagebionetworks.table.cluster.description.QueryIndexDescription;
+import org.sagebionetworks.table.cluster.description.SnapshotIndexDescription;
 import org.sagebionetworks.table.cluster.description.TableIndexDescription;
 import org.sagebionetworks.table.cluster.description.ViewIndexDescription;
 import org.sagebionetworks.table.cluster.description.VirtualTableIndexDescription;
@@ -153,12 +169,18 @@ public class TableQueryManagerImplTest {
 	@Mock
 	private QueryCacheManager mockQueryCacheManager;
 	@Mock
+	private FacetPostProcessorProvider mockFacetPostProcessorProvider;
+	@Mock
+	private FacetPostProcessor mockFacetPostProcessor;
+	@Mock
 	private RowHandlerProvider mockRowHandlerProvider;
 	@Mock
 	private RowHandler mockRowHandler;
 	@Mock
 	private QueryTranslations mockQueryTranslations;
-	
+	@Mock
+	private IndexAuthorizationSnapshotManager mockIndexAuthorizationSnapshotManager;
+
 	@Spy
 	@InjectMocks
 	private TableQueryManagerImpl manager;
@@ -208,7 +230,7 @@ public class TableQueryManagerImplTest {
 	public void before() throws Exception {
 		tableId = "syn123";
 		idAndVersion = IdAndVersion.parse(tableId);
-		user = new UserInfo(false, 7L);
+		user = new UserInfo(false, 7L, AuthorizationConstants.DEFAULT_REALM_ID);
 		
 		status = new TableStatus();
 		status.setTableId(tableId);
@@ -339,9 +361,51 @@ public class TableQueryManagerImplTest {
 		this.rows = newRows;
 	}
 
+	/**
+	 * Stub the authorization snapshot for an object so preflight resolves its as-built
+	 * {@link SnapshotIndexDescription} and schema (the pinned output-column id set) instead of
+	 * current-truth state. Mirrors the passing {@code testQueryPreflightWithSnapshot}.
+	 */
+	IndexAuthorizationSnapshot setupSnapshot(IdAndVersion id, TableType tableType, List<ColumnModel> schema,
+			List<BenefactorColumn> benefactors, List<SourceDependency> dependencies) {
+		List<ColumnLineageEntry> lineage = schema.stream()
+				.map(cm -> new ColumnLineageEntry().setOutputColumnId(cm.getId())).collect(Collectors.toList());
+		IndexAuthorizationSnapshot snapshot = new IndexAuthorizationSnapshot()
+				.setIndexDescription(new IndexDescriptionSnapshot()
+						.setObjectId("syn" + id.getId())
+						.setVersionNumber(id.getVersion().orElse(null))
+						.setTableType(tableType.name())
+						.setBenefactors(benefactors)
+						.setDependencies(dependencies))
+				.setColumnLineage(lineage);
+		when(mockIndexAuthorizationSnapshotManager.getAuthorizationSnapshot(id)).thenReturn(Optional.of(snapshot));
+		return snapshot;
+	}
+
+	/**
+	 * Convenience for a plain table (no benefactors, no dependencies).
+	 */
+	IndexAuthorizationSnapshot setupSnapshot(IdAndVersion id, TableType tableType, List<ColumnModel> schema) {
+		return setupSnapshot(id, tableType, schema, Collections.emptyList(), Collections.emptyList());
+	}
+
+	/**
+	 * Resolve each output-column id back to its {@link ColumnModel}, exactly as
+	 * {@code SnapshotSchemaProvider} does when reconstituting the as-built schema.
+	 */
+	void setupColumnModelAnswer(List<ColumnModel> schema) {
+		when(mockTableManagerSupport.getColumnModel(any())).thenAnswer(invocation -> {
+			String id = invocation.getArgument(0);
+			return schema.stream().filter(m -> m.getId().equals(id)).findFirst().orElse(null);
+		});
+	}
+
 	@Test
 	public void testQueryPreflightUnauthroized() throws Exception {
-		doThrow(new UnauthorizedException()).when(mockTableManagerSupport).validateTableReadAccess(any(), any());
+		// authorization is denied against the as-built snapshot, before any schema read
+		setupSnapshot(idAndVersion, TableType.table, Collections.emptyList());
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any()))
+				.thenReturn(AuthorizationStatus.accessDenied("no access"));
 		Query query = new Query();
 		query.setSql("select * from " + tableId);
 		assertThrows(UnauthorizedException.class, ()->{
@@ -351,17 +415,130 @@ public class TableQueryManagerImplTest {
 	
 	@Test
 	public void testQueryPreflightAuthorized() throws Exception {
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
 		Query query = new Query();
 		query.setSql("select * from " + tableId);
 		manager.queryPreflight(user, query, null, queryOptions);
-		verify(mockTableManagerSupport).validateTableReadAccess(user, indexDescription);
+		QueryIndexDescription expected = new SnapshotIndexDescription(idAndVersion, TableType.table,
+				Collections.emptyList(), Collections.emptyList(), id -> Optional.empty());
+		verify(mockTableManagerSupport).validateTableReadAccess(user, expected);
+	}
+
+	@Test
+	public void testQueryPreflightWithAggregateAllowed() throws Exception {
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		// row-level access is denied only because the source is bound to AGGREGATE_DATA
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any()))
+				.thenReturn(AuthorizationStatus.accessDeniedButAggregateAllowed("unmet access requirements", tableId));
+		AggregateDataConfiguration configuration = new AggregateDataConfiguration().setSuppressionThreshold(500L);
+		when(mockTableManagerSupport.getAggregateDataConfiguration(tableId)).thenReturn(Optional.of(configuration));
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
+
+		// call under test
+		QueryTranslations result = manager.queryPreflight(user, query, null, queryOptions);
+		assertNotNull(result);
+		assertTrue(result.isAggregateOnly());
+		assertEquals(500L, result.getSuppressionThreshold());
+		verify(mockTableManagerSupport).getAggregateDataConfiguration(tableId);
+	}
+
+	@Test
+	public void testQueryPreflightWithAggregateDeniedNoConfig() throws Exception {
+		// denial resolved against the snapshot before any schema read
+		setupSnapshot(idAndVersion, TableType.table, Collections.emptyList());
+		// the status reports an aggregate source, but no bound configuration is found, so
+		// the standard denial must be preserved rather than silently allowing the query
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any()))
+				.thenReturn(AuthorizationStatus.accessDeniedButAggregateAllowed("unmet access requirements", tableId));
+		when(mockTableManagerSupport.getAggregateDataConfiguration(tableId)).thenReturn(Optional.empty());
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
+
+		assertThrows(UnauthorizedException.class, () -> {
+			manager.queryPreflight(user, query, null, queryOptions);
+		});
+	}
+
+	@Test
+	public void testQueryPreflightWithSnapshot() throws Exception {
+		// The as-built snapshot pins the object's type and its output-column id set.
+		List<ColumnLineageEntry> lineage = new ArrayList<>();
+		for (ColumnModel cm : models) {
+			lineage.add(new ColumnLineageEntry().setOutputColumnId(cm.getId()));
+		}
+		when(mockTableManagerSupport.getColumnModel(any())).thenAnswer(invocation -> {
+			String id = invocation.getArgument(0);
+			return models.stream().filter(m -> m.getId().equals(id)).findFirst().orElse(null);
+		});
+		IndexAuthorizationSnapshot snapshot = new IndexAuthorizationSnapshot()
+				.setIndexDescription(new IndexDescriptionSnapshot().setObjectId(tableId)
+						.setTableType(TableType.table.name()).setBenefactors(Collections.emptyList())
+						.setDependencies(Collections.emptyList()))
+				.setColumnLineage(lineage);
+		when(mockIndexAuthorizationSnapshotManager.getAuthorizationSnapshot(idAndVersion))
+				.thenReturn(Optional.of(snapshot));
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
+
+		// call under test
+		manager.queryPreflight(user, query, null, queryOptions);
+
+		// Authorization runs against the reconstituted snapshot description, not the live index description.
+		QueryIndexDescription expected = new SnapshotIndexDescription(idAndVersion, TableType.table,
+				Collections.emptyList(), Collections.emptyList(), id -> Optional.empty());
+		verify(mockTableManagerSupport).validateTableReadAccess(user, expected);
+		// The live index description and live schema count are never consulted on the snapshot path.
+		verify(mockTableManagerSupport, never()).getIndexDescription(any());
+		verify(mockTableManagerSupport, never()).getTableSchemaCount(any());
+	}
+
+	@Test
+	public void testQueryPreflightWithSnapshotUnauthorized() throws Exception {
+		IndexAuthorizationSnapshot snapshot = new IndexAuthorizationSnapshot()
+				.setIndexDescription(new IndexDescriptionSnapshot().setObjectId(tableId)
+						.setTableType(TableType.table.name()).setBenefactors(Collections.emptyList())
+						.setDependencies(Collections.emptyList()))
+				.setColumnLineage(Collections.singletonList(
+						new ColumnLineageEntry().setOutputColumnId(models.get(0).getId())));
+		when(mockIndexAuthorizationSnapshotManager.getAuthorizationSnapshot(idAndVersion))
+				.thenReturn(Optional.of(snapshot));
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any()))
+				.thenReturn(AuthorizationStatus.accessDenied("no access"));
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
+
+		assertThrows(UnauthorizedException.class, () -> {
+			// call under test
+			manager.queryPreflight(user, query, null, queryOptions);
+		});
+		verify(mockTableManagerSupport, never()).getIndexDescription(any());
+	}
+
+	@Test
+	public void testQueryPreflightWithoutSnapshotAndNotVirtualTableThrows() throws Exception {
+		// A materialized object confirmed AVAILABLE under the read lock must have an as-built snapshot;
+		// its absence for a non-VirtualTable is an invariant violation, not a live fallback.
+		when(mockIndexAuthorizationSnapshotManager.getAuthorizationSnapshot(idAndVersion))
+				.thenReturn(Optional.empty());
+		when(mockTableManagerSupport.getTableType(idAndVersion)).thenReturn(TableType.table);
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
+
+		// call under test
+		assertThrows(IllegalStateException.class, () -> {
+			manager.queryPreflight(user, query, null, queryOptions);
+		});
 	}
 
 	@Test
@@ -479,152 +656,150 @@ public class TableQueryManagerImplTest {
 	public void testQueryAfterAuthorization() throws Exception{
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
-		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
-		when(mockQueryExecutor.executeQuery(any(), any())).thenReturn(rowSet);
-		
-		QueryTranslations query = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId).build(), queryOptions);
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
+		Long maxBytesPerPage = null;
+		// Only the SQL is parsed before the lock; authorization and translation are deferred into the
+		// locked callback. Stub preflight so this test focuses on the lock/availability orchestration.
+		doReturn(mockQueryTranslations).when(manager).queryPreflight(user, query, maxBytesPerPage, queryOptions);
+		QueryResultBundle expected = new QueryResultBundle();
+
 		// call under test.
-		QueryResultBundle result = manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, queryOptions, mockQueryExecutor);
-		assertNotNull(result);
-		assertNotNull(result.getQueryResult());
-		assertNotNull(result.getQueryResult().getQueryResults());
-		assertEquals(status.getLastTableChangeEtag(), result.getQueryResult().getQueryResults().getEtag());
-		// an exclusive lock must be held for a consistent query.
+		QueryResultBundle result = manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, maxBytesPerPage,
+				queryOptions, (translatedQuery, tableStatus) -> {
+					// the consumer receives the query translated under the lock and the status from the availability check.
+					assertEquals(mockQueryTranslations, translatedQuery);
+					assertEquals(status, tableStatus);
+					return expected;
+				});
+		assertEquals(expected, result);
+		// the read lock must be held while the query is authorized, translated, and run.
 		verify(mockTableManagerSupport).tryRunWithTableNonExclusiveLock(any(ProgressCallback.class), any(), any(ProgressingCallable.class), any(IdAndVersion.class));
-		// The table status should be checked only for a consistent query.
+		// availability is confirmed once, under the lock, before translation.
 		verify(mockTableManagerSupport).getTableStatusOrCreateIfNotExists(idAndVersion);
+		verify(manager).queryPreflight(user, query, maxBytesPerPage, queryOptions);
 	}
-	
+
 	@Test
 	public void testQueryAfterAuthorizationNotFoundException() throws Exception{
 		when(mockTableManagerSupport.tryRunWithTableNonExclusiveLock(
 						any(ProgressCallback.class), any(), any(ProgressingCallable.class),
 						any(IdAndVersion.class))).thenThrow(
 				new NotFoundException("not found"));
-		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
-		
-		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
-		
-		QueryTranslations query = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId).build(), queryOptions);
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
 		assertThrows(NotFoundException.class, ()->{
 			// call under test.
-			manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, queryOptions, null);
+			manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, null, queryOptions, (q, s) -> null);
 		});
 	}
-	
+
 	@Test
 	public void testQueryAfterAuthorizationTableUnavailableException() throws Exception{
 		when(mockTableManagerSupport.tryRunWithTableNonExclusiveLock(
 						any(ProgressCallback.class), any(), any(ProgressingCallable.class),
 						any(IdAndVersion.class))).thenThrow(
 				new TableUnavailableException(new TableStatus()));
-		
-		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
-		
-		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
-		
-		QueryTranslations query = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId).build(), queryOptions);
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
 		assertThrows(TableUnavailableException.class, ()->{
 			// call under test.
-			manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, queryOptions, null);
+			manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, null, queryOptions, (q, s) -> null);
 		});
 	}
-	
+
 	@Test
 	public void testQueryAfterAuthorizationTableFailedException() throws Exception{
 		when(mockTableManagerSupport.tryRunWithTableNonExclusiveLock(
 						any(ProgressCallback.class), any(), any(ProgressingCallable.class),
 						any(IdAndVersion.class))).thenThrow(
 				new TableFailedException(new TableStatus()));
-		
-		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
-		
-		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
-		
-		QueryTranslations query = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId).build(), queryOptions);
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
 		assertThrows(TableFailedException.class, ()->{
 			// call under test.
-			manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, queryOptions, null);
+			manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, null, queryOptions, (q, s) -> null);
 		});
 	}
-	
+
 	@Test
 	public void testQueryAfterAuthorizationLockUnavilableException() throws Exception{
 		when(mockTableManagerSupport.tryRunWithTableNonExclusiveLock(
 						any(ProgressCallback.class), any(), any(ProgressingCallable.class),
 						any(IdAndVersion.class))).thenThrow(
 				new LockUnavilableException(LockType.Read, "key", "context"));
-		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
-		
-		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
-		
-		QueryTranslations query = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId).build(), queryOptions);
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
 		assertThrows(LockUnavilableException.class, ()->{
 			// call under test.
-			manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, queryOptions, null);
+			manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, null, queryOptions, (q, s) -> null);
 		});
 
 	}
-	
+
 	@Test
 	public void testQueryAfterAuthorizationEmptyResultException() throws Exception{
 		when(mockTableManagerSupport.tryRunWithTableNonExclusiveLock(
 						any(ProgressCallback.class), any(), any(ProgressingCallable.class),
 						any(IdAndVersion.class))).thenThrow(
 				new EmptyResultException());
-		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
-		
-		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
-		
-		QueryTranslations query = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId).build(), queryOptions);
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
 		assertThrows(EmptyResultException.class, ()->{
 			// call under test.
-			manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, queryOptions, null);
+			manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, null, queryOptions, (q, s) -> null);
 		});
 	}
 	
 	@Test
 	public void testQueryPreflightWithAuthorizationTableEntity() throws Exception{
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
 		Query query = new Query();
 		query.setSql("select i0 from "+tableId);
 		Long maxBytesPerPage = null;
 		manager.queryPreflight(user, query, maxBytesPerPage, queryOptions);
-		
+
+		QueryIndexDescription expected = new SnapshotIndexDescription(idAndVersion, TableType.table,
+				Collections.emptyList(), Collections.emptyList(), id -> Optional.empty());
 		// auth check should occur
-		verify(mockTableManagerSupport).validateTableReadAccess(user, indexDescription);
+		verify(mockTableManagerSupport).validateTableReadAccess(user, expected);
 		// a benefactor check should not occur for TableEntities
 		verify(mockTableManagerSupport, never()).getAccessibleBenefactors(any(), any(), any());
 	}
 	
 	@Test
 	public void testQueryPreflightWithAuthorizationFileView() throws Exception{
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.entityview, models,
+				List.of(new BenefactorColumn().setBenefactorColumnName(TableConstants.ROW_BENEFACTOR)
+						.setBenefactorType(ObjectType.ENTITY.name())),
+				Collections.emptyList());
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		
-		IndexDescription indexDescription = new ViewIndexDescription(idAndVersion, TableType.entityview, -1L);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
 		when(mockTableIndexDAO.getDistinctLongValues(any(), any())).thenReturn(benfactors);
 		when(mockTableManagerSupport.getAccessibleBenefactors(any(), any(), any())).thenReturn(subSet);
-		
+
 		Query query = new Query();
 		query.setSql("select count(*) from "+tableId);
 		Long maxBytesPerPage = null;
 		// call under test
 		QueryTranslations results = manager.queryPreflight(user, query, maxBytesPerPage, queryOptions);
 		assertNotNull(results);
+		QueryIndexDescription expected = new SnapshotIndexDescription(idAndVersion, TableType.entityview,
+				List.of(new BenefactorDescription(TableConstants.ROW_BENEFACTOR, ObjectType.ENTITY)),
+				Collections.emptyList(), id -> Optional.empty());
 		// auth check should occur
-		verify(mockTableManagerSupport).validateTableReadAccess(user, indexDescription);
+		verify(mockTableManagerSupport).validateTableReadAccess(user, expected);
 		// a benefactor check must occur for FileViews
 		verify(mockTableManagerSupport).getAccessibleBenefactors(any(), any(), any());
 		// validate the benefactor filter is applied
@@ -636,38 +811,44 @@ public class TableQueryManagerImplTest {
 	
 	@Test
 	public void testQueryPreflightWithAuthorizationVirtualTable() throws Exception{
-	
-		// view setup
+
+		// source view syn1 is authorized against its as-built snapshot (entityview with a benefactor)
 		IdAndVersion viewId = IdAndVersion.parse("syn1");
-		IndexDescription viewIndexDescription = new ViewIndexDescription(viewId, TableType.entityview, -1L);
-		when(mockTableManagerSupport.getIndexDescription(viewId)).thenReturn(viewIndexDescription);
-		List<ColumnModel> viewSchema = List.of(new ColumnModel().setName("foo").setColumnType(ColumnType.INTEGER).setId("11"));
-		when(mockTableManagerSupport.getTableSchema(viewId)).thenReturn(viewSchema);
+		ColumnModel fooColumn = new ColumnModel().setName("foo").setColumnType(ColumnType.INTEGER).setId("11");
+		List<ColumnModel> viewSchema = List.of(fooColumn);
+		setupSnapshot(viewId, TableType.entityview, viewSchema,
+				List.of(new BenefactorColumn().setBenefactorColumnName(TableConstants.ROW_BENEFACTOR)
+						.setBenefactorType(ObjectType.ENTITY.name())),
+				Collections.emptyList());
 		when(mockTableConnectionFactory.getConnection(viewId)).thenReturn(mockTableIndexDAO);
 		when(mockTableIndexDAO.getDistinctLongValues(any(), any())).thenReturn(benfactors);
 		when(mockTableManagerSupport.getAccessibleBenefactors(any(), any(), any())).thenReturn(subSet);
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
-		// virtual table setup
+
+		// virtual table syn2 has no snapshot; it is inlined as a query over its source view syn1
 		IdAndVersion virtualTableId = IdAndVersion.parse("syn2");
-		String definingSql = "select * from syn1";
-		IndexDescription virtualTableIndexDescription = new VirtualTableIndexDescription(virtualTableId, definingSql, mockTableManagerSupport);
-		when(mockTableManagerSupport.getIndexDescription(virtualTableId)).thenReturn(virtualTableIndexDescription);
-		List<ColumnModel> virtualSchema = List.of(new ColumnModel().setName("bar").setColumnType(ColumnType.INTEGER).setId("22"));
-		when(mockTableManagerSupport.getTableSchemaCount(virtualTableId)).thenReturn((long)virtualSchema.size());
+		ColumnModel barColumn = new ColumnModel().setName("bar").setColumnType(ColumnType.INTEGER).setId("22");
+		List<ColumnModel> virtualSchema = List.of(barColumn);
+		when(mockIndexAuthorizationSnapshotManager.getAuthorizationSnapshot(virtualTableId)).thenReturn(Optional.empty());
+		when(mockTableManagerSupport.getTableType(virtualTableId)).thenReturn(TableType.virtualtable);
+		when(mockTableManagerSupport.getDefiningSql(virtualTableId)).thenReturn(Optional.of("select * from syn1"));
 		when(mockTableManagerSupport.getTableSchema(virtualTableId)).thenReturn(virtualSchema);
-		
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
+		setupColumnModelAnswer(List.of(fooColumn, barColumn));
+
 		Query query = new Query();
 		query.setSql("select count(*) from syn2");
 		Long maxBytesPerPage = null;
 		// call under test
 		QueryTranslations results = manager.queryPreflight(user, query, maxBytesPerPage, queryOptions);
-		
+
 		assertNotNull(results);
-		verify(mockTableManagerSupport, times(1)).validateTableReadAccess(any(), any());
-		verify(mockTableManagerSupport).validateTableReadAccess(user, virtualTableIndexDescription);
-		
+		// authorization runs once, against the virtual table whose only dependency is the snapshot-backed source view
+		ArgumentCaptor<QueryIndexDescription> captor = ArgumentCaptor.forClass(QueryIndexDescription.class);
+		verify(mockTableManagerSupport, times(1)).validateTableReadAccess(eq(user), captor.capture());
+		assertEquals(virtualTableId, captor.getValue().getIdAndVersion());
+		assertEquals(viewId, captor.getValue().getDependencies().get(0).getIdAndVersion());
+
 		// validate the benefactor filter is applied
 		assertEquals("WITH T2 (_C22_) AS "
 				+ "(SELECT _C11_ FROM T1 WHERE ROW_BENEFACTOR IN ( -:b0, :b1 ))"
@@ -789,6 +970,123 @@ public class TableQueryManagerImplTest {
 		assertNotNull(results.getQueryResult().getQueryResults());
 	}
 	
+	@Test
+	public void testExecuteQueryAggregateOnlyBelowThreshold() throws Exception {
+		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
+		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
+		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
+		// the count query matches 201 rows
+		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(countRowSet);
+
+		// aggregate-only forces a count query even though only runQuery was requested
+		queryOptions = new QueryOptions().withRunQuery(true);
+		QueryTranslations query = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId)
+				.setAggregateDataConfiguration(new AggregateDataConfiguration().setSuppressionThreshold(500L)).build(), queryOptions);
+
+		// call under test
+		BelowThresholdException thrown = assertThrows(BelowThresholdException.class, () -> {
+			manager.executeQuery(user, query, queryOptions, mockQueryExecutor);
+		});
+		assertEquals(500L, thrown.getSuppressionThreshold());
+		// the row-level query must never run for an aggregate-only query
+		verify(mockQueryExecutor, never()).executeQuery(any(), any());
+	}
+
+	@Test
+	public void testExecuteQueryAggregateOnlyAtThreshold() throws Exception {
+		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
+		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
+		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
+		// the count query matches 201 rows
+		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(countRowSet);
+
+		queryOptions = new QueryOptions().withRunQuery(true);
+		QueryTranslations query = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId)
+				.setAggregateDataConfiguration(new AggregateDataConfiguration().setSuppressionThreshold(count)).build(), queryOptions);
+
+		// call under test
+		QueryResultBundle results = manager.executeQuery(user, query, queryOptions, mockQueryExecutor);
+		assertNotNull(results);
+		// a count at the threshold is allowed; rows are suppressed but the count is returned
+		assertEquals(count, results.getQueryCount());
+		assertNull(results.getQueryResult());
+		verify(mockQueryExecutor, never()).executeQuery(any(), any());
+	}
+
+	@Test
+	public void testExecuteQueryAggregateOnlyAboveThreshold() throws Exception {
+		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
+		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
+		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
+		// the count query matches 201 rows
+		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(countRowSet);
+
+		queryOptions = new QueryOptions().withRunQuery(true);
+		QueryTranslations query = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId)
+				.setAggregateDataConfiguration(new AggregateDataConfiguration().setSuppressionThreshold(100L)).build(), queryOptions);
+
+		// call under test
+		QueryResultBundle results = manager.executeQuery(user, query, queryOptions, mockQueryExecutor);
+		assertNotNull(results);
+		assertEquals(count, results.getQueryCount());
+		assertNull(results.getQueryResult());
+		verify(mockQueryExecutor, never()).executeQuery(any(), any());
+	}
+
+	@Test
+	public void testExecuteQueryAggregateOnlyEmptyResult() throws Exception {
+		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
+		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
+		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
+		// an empty result: the count query matches 0 rows
+		RowSet emptyCountRowSet = new RowSet().setRows(List.of(new Row().setValues(List.of("0"))));
+		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(emptyCountRowSet);
+
+		queryOptions = new QueryOptions().withRunQuery(true);
+		QueryTranslations query = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId)
+				.setAggregateDataConfiguration(new AggregateDataConfiguration().setSuppressionThreshold(500L)).build(), queryOptions);
+
+		// call under test
+		QueryResultBundle results = manager.executeQuery(user, query, queryOptions, mockQueryExecutor);
+		assertNotNull(results);
+		// a zero-row result is not suppressed even when below the threshold
+		assertEquals(0L, results.getQueryCount());
+		assertNull(results.getQueryResult());
+		verify(mockQueryExecutor, never()).executeQuery(any(), any());
+	}
+
+	@Test
+	public void testQueryAfterAuthorizationAggregateOnly() throws Exception {
+		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
+		setupNonExclusiveLock();
+		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
+		when(mockSchemaProvider.getTableSchema(any())).thenReturn(models);
+		when(mockSchemaProvider.getColumnModel(any())).thenReturn(models.get(0));
+		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(countRowSet);
+
+		queryOptions = new QueryOptions().withRunQuery(true);
+		QueryTranslations translated = new QueryTranslations(queriesBuilder.setStartingSql("select * from " + tableId)
+				.setAggregateDataConfiguration(new AggregateDataConfiguration().setSuppressionThreshold(100L)).build(), queryOptions);
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
+		Long maxBytesPerPage = null;
+		doReturn(translated).when(manager).queryPreflight(user, query, maxBytesPerPage, queryOptions);
+
+		// call under test
+		QueryResultBundle result = manager.queryAfterAuthorization(mockProgressCallbackVoid, user, query, maxBytesPerPage,
+				queryOptions, (translatedQuery, tableStatus) -> {
+					QueryResultBundle bundle = manager.executeQuery(user, translatedQuery, queryOptions, mockQueryExecutor);
+					// rows are suppressed for an aggregate-only query, so the etag block must be null-guarded and not NPE.
+					manager.setConsistentQueryEtag(bundle, queryOptions, tableStatus);
+					return bundle;
+				});
+		assertNotNull(result);
+		// rows are suppressed, so there is no query result to stamp the etag onto
+		assertNull(result.getQueryResult());
+		assertEquals(count, result.getQueryCount());
+	}
+
 	@Test
 	public void testExecuteQuery_LastUpdatedOn() throws Exception {
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
@@ -1122,8 +1420,11 @@ public class TableQueryManagerImplTest {
 
 	@Test 
 	public void testQuerySinglePageEmptySchema() throws Exception {
-		// Return no columns
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn(0L);
+		// An as-built snapshot with no columns yields an empty schema.
+		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
+		setupNonExclusiveLock();
+		setupSnapshot(idAndVersion, TableType.table, Collections.emptyList());
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		Query query = new Query();
 		query.setSql("select * from " + tableId + " limit 1");
 		queryOptions = new QueryOptions().withRunQuery(true).withRunCount(false).withReturnFacets(false);
@@ -1141,13 +1442,7 @@ public class TableQueryManagerImplTest {
 	public void testQueryIndexNotAvailable() throws Exception {
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+
 		status.setState(TableState.PROCESSING);
 		Query query = new Query();
 		query.setSql("select * from " + tableId + " limit 1");
@@ -1158,7 +1453,9 @@ public class TableQueryManagerImplTest {
 		});
 		assertEquals(status, result.getStatus());
 		verify(mockTableManagerSupport, times(1)).getTableStatusOrCreateIfNotExists(idAndVersion);
-		verify(mockTableManagerSupport).validateTableReadAccess(user, indexDescription);
+		// Availability is now confirmed under the read lock BEFORE authorization or translation, so an
+		// unavailable table is rejected without ever authorizing the user.
+		verify(mockTableManagerSupport, never()).validateTableReadAccess(any(), any());
 	}
 	
 	
@@ -1167,12 +1464,10 @@ public class TableQueryManagerImplTest {
 			throws Exception {
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		when(mockTableIndexDAO.query(any())).thenReturn(new RowSet().setRows(rows));
 		
 		List<SelectColumn> selectColumns = TableModelUtils.getSelectColumns(models);
@@ -1244,14 +1539,11 @@ public class TableQueryManagerImplTest {
 	public void testQueryBundleFacets() throws Exception{
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
 		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(enumerationFacetResults, rangeFacetResults, enumerationFacetResults);
 
 		Query query = new Query();
@@ -1282,7 +1574,12 @@ public class TableQueryManagerImplTest {
 	}
 	
 	@Test
-	public void testQueryBundleSumFileSizes() throws LockUnavilableException, TableUnavailableException, TableFailedException {
+	public void testQueryBundleSumFileSizes() throws Exception {
+		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
+		setupNonExclusiveLock();
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		QueryBundleRequest queryBundle = new QueryBundleRequest();
 		Query query = new Query();
 		query.setSql("select * from " + tableId);
@@ -1343,13 +1640,10 @@ public class TableQueryManagerImplTest {
 	
 	@Test
 	public void testQueryPreflightSelectStar() throws Exception {
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-	
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
 		List<SortItem> sortList= null;
 		Query query = new Query();
 		query.setSql("select * from "+tableId);
@@ -1367,12 +1661,10 @@ public class TableQueryManagerImplTest {
 	
 	@Test
 	public void testQueryPreflightOverrideSort() throws Exception {
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
 		SortItem sort = new SortItem();
 		sort.setColumn("i0");
 		sort.setDirection(SortDirection.DESC);
@@ -1389,11 +1681,9 @@ public class TableQueryManagerImplTest {
 
 	@Test
 	public void testQueryPreflight_AdditionalQueryFilters() throws Exception {
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 
 		Query query = new Query();
 		query.setSql("select i2, i0 from "+tableId);
@@ -1415,12 +1705,9 @@ public class TableQueryManagerImplTest {
 	
 	@Test
 	public void testQueryPreflight_AdditionalQueryFiltersWithHasLike() throws Exception {
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 
 		Query query = new Query();
 		query.setSql("select i2, i0 from "+tableId);
@@ -1445,11 +1732,9 @@ public class TableQueryManagerImplTest {
 	@Test
 	public void testQueryPreflight_AdditionalQueryFiltersWithHas() throws Exception {
 
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long) models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 
 		Query query = new Query();
 		query.setSql("select i2, i0 from " + tableId);
@@ -1467,15 +1752,17 @@ public class TableQueryManagerImplTest {
 		assertNotNull(result);
 		assertEquals("SELECT _C2_, _C0_, ROW_ID, ROW_VERSION FROM T123 WHERE ( ( JSON_OVERLAPS(LOWER(_C13_),LOWER(JSON_ARRAY(:b0,:b1))) IS TRUE ) )",
 				result.getMainQuery().getTranslator().getOutputSQL());
-		verify(mockTableManagerSupport).validateTableReadAccess(user, indexDescription);
+		verify(mockTableManagerSupport).validateTableReadAccess(user, new SnapshotIndexDescription(idAndVersion,
+				TableType.table, Collections.emptyList(), Collections.emptyList(), id -> Optional.empty()));
 		assertEquals("bar", result.getMainQuery().getTranslator().getParameters().get("b0"));
 		assertEquals("foo%", result.getMainQuery().getTranslator().getParameters().get("b1"));
 	}
 	
 	@Test
 	public void testQueryPreflightEmptySchema() throws Exception {
-		// Return no columns
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn(0L);
+		// An as-built snapshot with no columns yields an empty schema.
+		setupSnapshot(idAndVersion, TableType.table, Collections.emptyList());
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		Query query = new Query();
 		query.setSql("select * from "+tableId);
 		Long maxBytesPerPage = null;
@@ -1502,15 +1789,12 @@ public class TableQueryManagerImplTest {
 	public void testRunQueryDownloadAsStreamDownload() throws Exception{
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		setupQueryCallback();
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+
 		DownloadFromTableRequest request = new DownloadFromTableRequest();
 		request.setSql("select * from "+tableId);
 		request.setSort(null);
@@ -1521,8 +1805,9 @@ public class TableQueryManagerImplTest {
 		DownloadFromTableResult results = manager.runQueryDownloadAsCSV(
 				mockProgressCallbackVoid, user, request, writer);
 		assertNotNull(results);
-		
-		verify(mockTableManagerSupport).validateTableReadAccess(user, indexDescription);
+
+		verify(mockTableManagerSupport).validateTableReadAccess(user, new SnapshotIndexDescription(idAndVersion,
+				TableType.table, Collections.emptyList(), Collections.emptyList(), id -> Optional.empty()));
 		assertEquals(11, writtenLines.size());
 	}
 	
@@ -1530,15 +1815,12 @@ public class TableQueryManagerImplTest {
 	public void testRunQueryDownloadAsStreamDownloadDefaultValues() throws Exception{
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		setupQueryCallback();
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+
 		DownloadFromTableRequest request = new DownloadFromTableRequest();
 		request.setSql("select i0 from "+tableId);
 		request.setSort(null);
@@ -1565,17 +1847,17 @@ public class TableQueryManagerImplTest {
 	public void testRunQueryDownloadAsStreamDownloadViewIncludeEtag() throws Exception{
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.entityview, models,
+				List.of(new BenefactorColumn().setBenefactorColumnName(TableConstants.ROW_BENEFACTOR)
+						.setBenefactorType(ObjectType.ENTITY.name())),
+				Collections.emptyList());
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
 		when(mockTableIndexDAO.getDistinctLongValues(idAndVersion, TableConstants.ROW_BENEFACTOR)).thenReturn(benfactors);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(new TableIndexDescription(idAndVersion));
+		when(mockTableManagerSupport.getAccessibleBenefactors(any(), any(), any())).thenReturn(subSet);
 		setupQueryCallback();
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
-		IndexDescription indexDescription = new ViewIndexDescription(idAndVersion, TableType.entityview, -1L);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
+
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		DownloadFromTableRequest request = new DownloadFromTableRequest();
 		request.setSql("select i0 from "+tableId);
 		request.setSort(null);
@@ -1603,16 +1885,12 @@ public class TableQueryManagerImplTest {
 	public void testRunQueryDownloadAsStreamDownloadTableIncludeEtag() throws Exception{
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-
 		setupQueryCallback();
-		
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
+
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		DownloadFromTableRequest request = new DownloadFromTableRequest();
 		request.setSql("select i0 from "+tableId);
 		request.setSort(null);
@@ -1640,15 +1918,12 @@ public class TableQueryManagerImplTest {
 	public void testRunQueryDownloadAsStreamDownloadIncludeEtagWithoutRowId() throws Exception {
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		setupQueryCallback();
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+
 		DownloadFromTableRequest request = new DownloadFromTableRequest();
 		request.setSql("select i0 from "+tableId);
 		request.setSort(null);
@@ -1695,9 +1970,12 @@ public class TableQueryManagerImplTest {
 	}
 	
 	@Test
-	public void testRunQueryDownloadAsStreamEmptyDownload() throws NotFoundException, TableUnavailableException, TableFailedException, LockUnavilableException {
-		// Return no columns
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn(0L);
+	public void testRunQueryDownloadAsStreamEmptyDownload() throws Exception {
+		// An as-built snapshot with no columns yields an empty schema.
+		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
+		setupNonExclusiveLock();
+		setupSnapshot(idAndVersion, TableType.table, Collections.emptyList());
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		DownloadFromTableRequest request = new DownloadFromTableRequest();
 		request.setSql("select * from "+tableId);
 		request.setSort(null);
@@ -1720,7 +1998,7 @@ public class TableQueryManagerImplTest {
 		long count = manager.runCountQuery(query, mockTableIndexDAO);
 		assertEquals(1l, count);
 		// no need to run a query for a simple aggregate
-		verifyZeroInteractions(mockQueryCacheManager);
+		verifyNoMoreInteractions(mockQueryCacheManager);
 	}
 	
 	@Test
@@ -1945,12 +2223,10 @@ public class TableQueryManagerImplTest {
 	public void testQuerySinglePageWithNextPage() throws Exception{
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(countRowSet);
 		
 		// setup the results to return one row.
@@ -1990,6 +2266,11 @@ public class TableQueryManagerImplTest {
 		rows.add(row);
 		// no options
 		queryOptions = new QueryOptions();
+		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
+		setupNonExclusiveLock();
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		Query query = new Query();
 		query.setSql("select * from "+tableId);
 		query.setSort(sortList);
@@ -1999,7 +2280,7 @@ public class TableQueryManagerImplTest {
 		// call under test.
 		QueryResultBundle result = manager.querySinglePage(
 				mockProgressCallbackVoid, user, query, queryOptions);
-		
+
 		assertNotNull(result);
 		assertNull(result.getMaxRowsPerPage());
 		assertNull(result.getQueryResult());
@@ -2007,7 +2288,15 @@ public class TableQueryManagerImplTest {
 	}
 	
 	@Test
-	public void testQuerySinglePageWithNoNextPage() throws Exception{		
+	public void testQuerySinglePageWithNoNextPage() throws Exception{
+		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
+		setupNonExclusiveLock();
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
+		when(mockTableIndexDAO.query(any())).thenReturn(new RowSet().setRows(rows));
+		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(countRowSet);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		queryOptions = new QueryOptions().withRunQuery(true).withRunCount(true).withReturnFacets(false);
 		Query query = new Query();
 		query.setSql("select * from "+tableId);
@@ -2030,13 +2319,11 @@ public class TableQueryManagerImplTest {
 	public void testQuerySinglePageWithEtag() throws Exception {
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
 		addRowIdAndVersionToRows();
 		convertRowsToEntityRows();
 		
@@ -2060,7 +2347,15 @@ public class TableQueryManagerImplTest {
 	}
 	
 	@Test
-	public void testQuerySinglePageRunQueryTrue() throws Exception{		
+	public void testQuerySinglePageRunQueryTrue() throws Exception{
+		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
+		setupNonExclusiveLock();
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
+		when(mockTableIndexDAO.query(any())).thenReturn(new RowSet().setRows(rows));
+		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(countRowSet);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		queryOptions = new QueryOptions().withRunQuery(true).withRunCount(true).withReturnFacets(false);
 		Query query = new Query();
 		query.setSql("select * from "+tableId);
@@ -2080,7 +2375,13 @@ public class TableQueryManagerImplTest {
 	}
 	
 	@Test
-	public void testQuerySinglePageRunQueryFalse() throws Exception{		
+	public void testQuerySinglePageRunQueryFalse() throws Exception{
+		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
+		setupNonExclusiveLock();
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
+		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(countRowSet);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
 		queryOptions = new QueryOptions().withRunQuery(false).withRunCount(true).withReturnFacets(false);
 		Query query = new Query();
 		query.setSql("select * from "+tableId);
@@ -2103,14 +2404,11 @@ public class TableQueryManagerImplTest {
 	public void testQuerySinglePageOverrideLimit() throws Exception{
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
 		ArgumentCaptor<CachedQueryRequest> countQuery = ArgumentCaptor.forClass(CachedQueryRequest.class);
 		
 		when(mockQueryCacheManager.getQueryResults(any(), countQuery.capture())).thenReturn(countRowSet);
@@ -2140,14 +2438,11 @@ public class TableQueryManagerImplTest {
 	public void testQuerySinglePageWithLimit() throws Exception{
 		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
 		setupNonExclusiveLock();
-		when(mockTableManagerSupport.getTableSchemaCount(any())).thenReturn((long)models.size());
-		when(mockTableManagerSupport.getTableSchema(idAndVersion)).thenReturn(models);
+		setupSnapshot(idAndVersion, TableType.table, models);
+		setupColumnModelAnswer(models);
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
-		when(mockTableManagerSupport.getColumnModel(any())).thenReturn(models.get(0));
-		
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+
 		when(mockQueryCacheManager.getQueryResults(any(), any())).thenReturn(countRowSet);
 		
 		queryOptions = new QueryOptions().withRunQuery(false).withRunCount(true).withReturnFacets(false);
@@ -2170,9 +2465,10 @@ public class TableQueryManagerImplTest {
 	public void testBuildBenefactorFilter() throws ParseException, EmptyResultException{
 		QuerySpecification query = new TableQueryParser("select i0 from "+tableId+" where i1 is not null").querySpecification();
 		LinkedHashSet<Long> benefactorIds = new LinkedHashSet<Long>();
+		benefactorIds.add(-1l);
 		benefactorIds.add(456L);
 		benefactorIds.add(123L);
-		
+
 		// call under test
 		TableQueryManagerImpl.buildBenefactorFilter(query, benefactorIds, TableConstants.ROW_BENEFACTOR);
 		// should filter by benefactorId
@@ -2235,6 +2531,7 @@ public class TableQueryManagerImplTest {
 	public void testBuildBenefactorFilterWithoutWhereClause() throws ParseException, EmptyResultException{
 		final QuerySpecification query = new TableQueryParser("select i0 from "+tableId).querySpecification();
 		final LinkedHashSet<Long> benefactorIds = new LinkedHashSet<Long>();
+		benefactorIds.add(-1l);
 		benefactorIds.add(456L);
 		benefactorIds.add(123L);
 		// call under test
@@ -2260,10 +2557,11 @@ public class TableQueryManagerImplTest {
 	public void testBuildBenefactorFilterWithOtherBenefactorColumnName() throws ParseException, EmptyResultException{
 		QuerySpecification query = new TableQueryParser("select i0 from "+tableId+" where i1 is not null").querySpecification();
 		LinkedHashSet<Long> benefactorIds = new LinkedHashSet<Long>();
+		benefactorIds.add(-1l);
 		benefactorIds.add(456L);
 		benefactorIds.add(123L);
 		String benefactorColumnName = "BENEFACTOR_TWO";
-		
+
 		// call under test
 		TableQueryManagerImpl.buildBenefactorFilter(query, benefactorIds, benefactorColumnName);
 		// should filter by benefactorId
@@ -2275,9 +2573,10 @@ public class TableQueryManagerImplTest {
 		// there is no benefactor column in the schema.
 		QuerySpecification query = new TableQueryParser("select i0 from "+tableId+" where i1 is not null").querySpecification();
 		LinkedHashSet<Long> benefactorIds = new LinkedHashSet<Long>();
+		benefactorIds.add(-1l);
 		benefactorIds.add(456L);
 		benefactorIds.add(123L);
-		
+
 		// call under test
 		TableQueryManagerImpl.buildBenefactorFilter(query, benefactorIds, TableConstants.ROW_BENEFACTOR);
 		// should filter by benefactorId
@@ -2297,12 +2596,13 @@ public class TableQueryManagerImplTest {
 	 * @throws EmptyResultException
 	 */
 	@Test
-	public void testBuildBenefactorFilterPLFM_4036() throws ParseException, EmptyResultException {	
+	public void testBuildBenefactorFilterPLFM_4036() throws ParseException, EmptyResultException {
 		QuerySpecification query = new TableQueryParser("select i0 from "+tableId+" where i1 > 0 or i1 is not null").querySpecification();
 		LinkedHashSet<Long> benefactorIds = new LinkedHashSet<Long>();
+		benefactorIds.add(-1l);
 		benefactorIds.add(456L);
 		benefactorIds.add(123L);
-		
+
 		// call under test
 		TableQueryManagerImpl.buildBenefactorFilter(query, benefactorIds, TableConstants.ROW_BENEFACTOR);
 		// should filter by benefactorId
@@ -2314,6 +2614,7 @@ public class TableQueryManagerImplTest {
 		// no where clause in the original query.
 		QuerySpecification query = new TableQueryParser("select i0 from "+tableId).querySpecification();
 		LinkedHashSet<Long> benefactorIds = new LinkedHashSet<Long>();
+		benefactorIds.add(-1l);
 		benefactorIds.add(123L);
 		// call under test
 		TableQueryManagerImpl.buildBenefactorFilter(query, benefactorIds, TableConstants.ROW_BENEFACTOR);
@@ -2325,6 +2626,9 @@ public class TableQueryManagerImplTest {
 	public void testBuildBenefactorFilterEmpty() throws ParseException, EmptyResultException{
 		QuerySpecification query = new TableQueryParser("select i0 from "+tableId+" where i1 is not null").querySpecification();
 		LinkedHashSet<Long> benefactorIds = new LinkedHashSet<Long>();
+		// -1 is the caller-supplied sentinel; with no real accessible benefactors the
+		// filter always evaluates to false for normal rows (only rows with no benefactor match).
+		benefactorIds.add(-1l);
 		// call under test
 		TableQueryManagerImpl.buildBenefactorFilter(query, benefactorIds, TableConstants.ROW_BENEFACTOR);
 
@@ -2336,63 +2640,45 @@ public class TableQueryManagerImplTest {
 	@Test
 	public void testAddRowLevelFilterEmpty() throws Exception {
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		when(mockTableIndexDAO.getDistinctLongValues(idAndVersion, TableConstants.ROW_BENEFACTOR)).thenReturn(benfactors);
 		IndexDescription indexDescription = new ViewIndexDescription(idAndVersion, TableType.entityview, -1L);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
 		QuerySpecification query = new TableQueryParser("select i0 from "+tableId).querySpecification();
 		//return empty benefactors
 		when(mockTableIndexDAO.getDistinctLongValues(idAndVersion, TableConstants.ROW_BENEFACTOR)).thenReturn(new HashSet<Long>());
 		// call under test
-		manager.addRowLevelFilter(user, query);
+		manager.addRowLevelFilter(user, query, indexDescription);
 		assertEquals("SELECT i0 FROM syn123 WHERE ROW_BENEFACTOR IN ( -1 )", query.toSql());
-		verify(mockTableManagerSupport).getIndexDescription(idAndVersion);
-	}
-	
-	@Test
-	public void testAddRowLevelFilterWithJoin() throws Exception {
-		QuerySpecification query = new TableQueryParser("select * from syn123 join syn456").querySpecification();
-		String message = assertThrows(IllegalArgumentException.class, ()->{
-			// call under test
-			manager.addRowLevelFilter(user, query);
-		}).getMessage();
-		assertEquals(TableConstants.JOIN_NOT_SUPPORTED_IN_THIS_CONTEX_MESSAGE, message);
 	}
 
 	@Test
 	public void getAddRowLevelFilterTableDoesNotExist() throws Exception {
 		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
-		when(mockTableIndexDAO.getDistinctLongValues(idAndVersion, TableConstants.ROW_BENEFACTOR)).thenReturn(benfactors);
-		
+
 		QuerySpecification query = new TableQueryParser("select i0 from "+tableId).querySpecification();
 		//return empty benefactors
 		when(mockTableIndexDAO.getDistinctLongValues(idAndVersion, TableConstants.ROW_BENEFACTOR)).thenThrow(BadSqlGrammarException.class);
 		IndexDescription indexDescription = new ViewIndexDescription(idAndVersion, TableType.entityview, -1L);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
+
 		// call under test
-		manager.addRowLevelFilter(user, query);
+		manager.addRowLevelFilter(user, query, indexDescription);
 
 		//Throw table not existing should be treated same as not having benefactors.
 		assertEquals("SELECT i0 FROM syn123 WHERE ROW_BENEFACTOR IN ( -1 )", query.toSql());
-		verify(mockTableManagerSupport).getIndexDescription(idAndVersion);
 	}
-	
+
 	@Test
 	public void testAddRowLevelFilter() throws Exception {
 		when(mockTableConnectionFactory.getConnection(any())).thenReturn(mockTableIndexDAO);
 		when(mockTableIndexDAO.getDistinctLongValues(any(), any())).thenReturn(benfactors);
 		when(mockTableManagerSupport.getAccessibleBenefactors(any(), any(), any())).thenReturn(subSet);
 		IndexDescription indexDescription = new ViewIndexDescription(idAndVersion, TableType.entityview, -1L);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
+
 		QuerySpecification query = new TableQueryParser("select i0 from "+tableId).querySpecification();
 		// call under test
-		manager.addRowLevelFilter(user, query);
+		manager.addRowLevelFilter(user, query, indexDescription);
 
 		assertEquals("SELECT i0 FROM syn123 WHERE ROW_BENEFACTOR IN ( -1, 444 )", query.toSql());
 		verify(mockTableIndexDAO).getDistinctLongValues(idAndVersion, TableConstants.ROW_BENEFACTOR);
 		verify(mockTableManagerSupport).getAccessibleBenefactors(user, ObjectType.ENTITY, benfactors);
-		verify(mockTableManagerSupport).getIndexDescription(idAndVersion);
 	}
 	
 	public void setupLookup(IndexDescription...all){
@@ -2414,21 +2700,19 @@ public class TableQueryManagerImplTest {
 				new ViewIndexDescription(viewTwoId, TableType.entityview, -1L));
 		IndexDescription indexDescription = new MaterializedViewIndexDescription(idAndVersion,
 				"select * from syn1 a join syn2 on (a.id=b.id)", mockTableManagerSupport);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
 
 		QuerySpecification query = new TableQueryParser("select * from "+tableId).querySpecification();
 		// call under test
-		manager.addRowLevelFilter(user, query);
+		manager.addRowLevelFilter(user, query, indexDescription);
 
 		assertEquals("SELECT * FROM syn123 WHERE ( ROW_BENEFACTOR__A0 IN ( -1, 444 ) ) AND ROW_BENEFACTOR__A1 IN ( -1, 111 )", query.toSql());
 		verify(mockTableIndexDAO).getDistinctLongValues(idAndVersion, "ROW_BENEFACTOR__A0");
 		verify(mockTableIndexDAO).getDistinctLongValues(idAndVersion, "ROW_BENEFACTOR__A1");
 		verify(mockTableIndexDAO, times(2)).getDistinctLongValues(any(), any());
-		
+
 		verify(mockTableManagerSupport).getAccessibleBenefactors(user, ObjectType.ENTITY, oneBenefactors);
 		verify(mockTableManagerSupport).getAccessibleBenefactors(user, ObjectType.ENTITY, twoBenefactors);
 		verify(mockTableManagerSupport, times(2)).getAccessibleBenefactors(any(), any(), any());
-		verify(mockTableManagerSupport).getIndexDescription(idAndVersion);
 	}
 	
 	@Test
@@ -2444,36 +2728,32 @@ public class TableQueryManagerImplTest {
 		setupLookup(new ViewIndexDescription(viewOneId, TableType.entityview, -1L));
 		IndexDescription indexDescription = new MaterializedViewIndexDescription(idAndVersion,
 				"select * from syn1 a join syn1 on (a.id=b.id)", mockTableManagerSupport);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
 
 		QuerySpecification query = new TableQueryParser("select * from "+tableId).querySpecification();
 		// call under test
-		manager.addRowLevelFilter(user, query);
+		manager.addRowLevelFilter(user, query, indexDescription);
 
 		assertEquals("SELECT * FROM syn123 WHERE ( ROW_BENEFACTOR__A0 IN ( -1, 444 ) ) AND ROW_BENEFACTOR__A1 IN ( -1, 111 )", query.toSql());
 		verify(mockTableIndexDAO).getDistinctLongValues(idAndVersion, "ROW_BENEFACTOR__A0");
 		verify(mockTableIndexDAO).getDistinctLongValues(idAndVersion, "ROW_BENEFACTOR__A1");
 		verify(mockTableIndexDAO, times(2)).getDistinctLongValues(any(), any());
-		
+
 		verify(mockTableManagerSupport).getAccessibleBenefactors(user, ObjectType.ENTITY, oneBenefactors);
 		verify(mockTableManagerSupport).getAccessibleBenefactors(user, ObjectType.ENTITY, twoBenefactors);
 		verify(mockTableManagerSupport, times(2)).getAccessibleBenefactors(any(), any(), any());
-		verify(mockTableManagerSupport).getIndexDescription(idAndVersion);
 	}
 	
 	@Test
 	public void testAddRowLevelFilterWithTable() throws Exception {
 		IndexDescription indexDescription = new TableIndexDescription(idAndVersion);
-		when(mockTableManagerSupport.getIndexDescription(any())).thenReturn(indexDescription);
-		
+
 		QuerySpecification query = new TableQueryParser("select i0 from "+tableId).querySpecification();
 		// call under test
-		manager.addRowLevelFilter(user, query);
+		manager.addRowLevelFilter(user, query, indexDescription);
 
 		assertEquals("SELECT i0 FROM syn123", query.toSql());
 		verify(mockTableIndexDAO, never()).getDistinctLongValues(any(), any());
 		verify(mockTableManagerSupport, never()).getAccessibleBenefactors(any(), any(), any());
-		verify(mockTableManagerSupport).getIndexDescription(idAndVersion);
 	}
 	
 	
@@ -2558,6 +2838,79 @@ public class TableQueryManagerImplTest {
 
 	}
 	
+	////////////////////////////
+	// applyFacets() Tests
+	////////////////////////////
+	@Test
+	public void testApplyFacetsWithAggregateOnly() {
+		FacetColumnResultValues enumeration = new FacetColumnResultValues().setColumnName("state");
+		FacetColumnResultRange range = new FacetColumnResultRange().setColumnName("age");
+		// the raw facets include a range facet, which must be dropped before post-processing
+		doReturn(new ArrayList<>(List.of(enumeration, range))).when(manager).runFacetQueries(any(), any());
+
+		List<FacetColumnResult> processed = List.of(new FacetColumnResultBinnedValues().setColumnName("state"));
+		FacetRoundingParameters params = new FacetRoundingParameters().setRoundTo(5L);
+		when(mockFacetPostProcessorProvider.getProcessor(FacetPostProcessingAlgorithm.ROUNDING)).thenReturn(mockFacetPostProcessor);
+		ArgumentCaptor<List<FacetColumnResult>> facetsCaptor = ArgumentCaptor.forClass(List.class);
+		when(mockFacetPostProcessor.process(facetsCaptor.capture(), eq(params))).thenReturn(processed);
+
+		AggregateDataConfiguration config = new AggregateDataConfiguration().setSuppressionThreshold(10L)
+				.setFacetPostProcessingConfig(new FacetPostProcessingConfig()
+						.setAlgorithm(FacetPostProcessingAlgorithm.ROUNDING).setParameters(params));
+		when(mockQueryTranslations.getFacetQueries()).thenReturn(Optional.of(Mockito.mock(FacetQueries.class)));
+		when(mockQueryTranslations.isAggregateOnly()).thenReturn(true);
+		when(mockQueryTranslations.getAggregateDataConfiguration()).thenReturn(Optional.of(config));
+
+		QueryResultBundle bundle = new QueryResultBundle();
+
+		// call under test
+		manager.applyFacets(bundle, mockQueryTranslations, mockTableIndexDAO);
+
+		assertEquals(processed, bundle.getFacets());
+		assertTrue(bundle.getFacetPostProcessingApplied());
+		// the range facet is dropped, so only the enumeration facet reaches the processor
+		assertEquals(List.of(enumeration), facetsCaptor.getValue());
+	}
+
+	@Test
+	public void testApplyFacetsWithAggregateOnlyNoPostProcessingConfig() {
+		doReturn(new ArrayList<>(List.of(new FacetColumnResultValues()))).when(manager).runFacetQueries(any(), any());
+		// aggregate-only, but the bound configuration carries no facet post-processing config
+		AggregateDataConfiguration config = new AggregateDataConfiguration().setSuppressionThreshold(10L);
+		when(mockQueryTranslations.getFacetQueries()).thenReturn(Optional.of(Mockito.mock(FacetQueries.class)));
+		when(mockQueryTranslations.isAggregateOnly()).thenReturn(true);
+		when(mockQueryTranslations.getAggregateDataConfiguration()).thenReturn(Optional.of(config));
+
+		QueryResultBundle bundle = new QueryResultBundle();
+
+		// call under test
+		assertThrows(IllegalStateException.class, () -> {
+			manager.applyFacets(bundle, mockQueryTranslations, mockTableIndexDAO);
+		});
+		// fail closed: no facets are exposed and the processor is never consulted
+		assertNull(bundle.getFacets());
+		verifyNoInteractions(mockFacetPostProcessorProvider);
+	}
+
+	@Test
+	public void testApplyFacetsWithFullAccess() {
+		List<FacetColumnResult> raw = new ArrayList<>(
+				List.of(new FacetColumnResultValues().setColumnName("state"), new FacetColumnResultRange().setColumnName("age")));
+		doReturn(raw).when(manager).runFacetQueries(any(), any());
+		when(mockQueryTranslations.getFacetQueries()).thenReturn(Optional.of(Mockito.mock(FacetQueries.class)));
+		when(mockQueryTranslations.isAggregateOnly()).thenReturn(false);
+
+		QueryResultBundle bundle = new QueryResultBundle();
+
+		// call under test
+		manager.applyFacets(bundle, mockQueryTranslations, mockTableIndexDAO);
+
+		// full access returns the raw facets unchanged (range facet retained) and flags no post-processing
+		assertEquals(raw, bundle.getFacets());
+		assertFalse(bundle.getFacetPostProcessingApplied());
+		verifyNoInteractions(mockFacetPostProcessorProvider);
+	}
+
 	@Test
 	public void testRunSumFileSize() throws Exception {
 		List<IdAndVersion> idAndVersionList = Arrays.asList(
@@ -2680,14 +3033,20 @@ public class TableQueryManagerImplTest {
 		queryOptions = new QueryOptions().withRunQuery(true).withReturnSelectColumns(true).withRunCount(false)
 				.withReturnFacets(false);
 		Query request = new Query().setSql("select * from " + idAndVersion.toString());
-		doReturn(mockQueryTranslations).when(manager).queryPreflight(user, request, null, queryOptions);
 
 		when(mockRowHandlerProvider.getHandler(mockQueryTranslations)).thenReturn(mockRowHandler);
-		StreamingQueryExecutor executor = new StreamingQueryExecutor(mockRowHandler);
-
 		QueryResultBundle expected = new QueryResultBundle().setQueryCount(1L);
-		doReturn(expected).when(manager).queryAfterAuthorization(mockProgressCallbackVoid, user, mockQueryTranslations,
-				queryOptions, executor);
+		// executeQuery is covered separately; here we only verify runQueryAsStream opens the handler under
+		// the lock, runs the translated query against it, and closes the handler.
+		doReturn(expected).when(manager).executeQuery(eq(user), eq(mockQueryTranslations), eq(queryOptions),
+				any(StreamingQueryExecutor.class));
+		// queryAfterAuthorization runs its consumer under the read lock; invoke it here with the query the
+		// preflight would have translated so the streaming consumer executes.
+		doAnswer(invocation -> {
+			TableQueryManagerImpl.TranslatedQueryConsumer consumer = invocation.getArgument(5);
+			return consumer.apply(mockQueryTranslations, status);
+		}).when(manager).queryAfterAuthorization(eq(mockProgressCallbackVoid), eq(user), eq(request), isNull(),
+				eq(queryOptions), any(TableQueryManagerImpl.TranslatedQueryConsumer.class));
 
 		// call under test
 		QueryResultBundle results = manager.runQueryAsStream(mockProgressCallbackVoid, user, request,
@@ -2696,14 +3055,17 @@ public class TableQueryManagerImplTest {
 
 		verify(mockRowHandler).close();
 	}
-	
+
 	@Test
 	public void testRunQueryAsStreamWithEmptyException() throws Exception {
 		queryOptions = new QueryOptions().withRunQuery(true).withReturnSelectColumns(true).withRunCount(false)
 				.withReturnFacets(false);
 		Query request = new Query().setSql("select * from " + idAndVersion.toString());
-		doThrow(new EmptyResultException("message", "syn123")).when(manager).queryPreflight(user, request, null,
-				queryOptions);
+		// The empty-schema check runs inside queryPreflight, under the lock, so it surfaces out of
+		// queryAfterAuthorization; runQueryAsStream maps it to an IllegalArgumentException.
+		doThrow(new EmptyResultException("message", "syn123")).when(manager).queryAfterAuthorization(
+				eq(mockProgressCallbackVoid), eq(user), eq(request), isNull(), eq(queryOptions),
+				any(TableQueryManagerImpl.TranslatedQueryConsumer.class));
 
 		String message = assertThrows(IllegalArgumentException.class, () -> {
 			// call under test
@@ -2713,7 +3075,78 @@ public class TableQueryManagerImplTest {
 
 		verify(mockRowHandler, never()).close();
 	}
-	
+
+	@Test
+	public void testComputeAccessibleBenefactorsWithMultipleBenefactors() {
+		IdAndVersion tableIdAndVersion = IdAndVersion.parse("syn123");
+		BenefactorDescription descA0 = new BenefactorDescription("ROW_BENEFACTOR__A0", ObjectType.ENTITY);
+		BenefactorDescription descA1 = new BenefactorDescription("ROW_BENEFACTOR__A1", ObjectType.ENTITY);
+		IndexDescription indexDescription = Mockito.mock(IndexDescription.class);
+		when(indexDescription.getIdAndVersion()).thenReturn(tableIdAndVersion);
+		when(indexDescription.getBenefactors()).thenReturn(List.of(descA0, descA1));
+
+		Set<Long> tableBenefactorsA0 = Sets.newHashSet(10L, 20L);
+		Set<Long> tableBenefactorsA1 = Sets.newHashSet(30L, 40L);
+		when(mockTableIndexDAO.getDistinctLongValues(tableIdAndVersion, "ROW_BENEFACTOR__A0")).thenReturn(tableBenefactorsA0);
+		when(mockTableIndexDAO.getDistinctLongValues(tableIdAndVersion, "ROW_BENEFACTOR__A1")).thenReturn(tableBenefactorsA1);
+
+		when(mockTableManagerSupport.getAccessibleBenefactors(user, ObjectType.ENTITY, tableBenefactorsA0)).thenReturn(new HashSet<>(Set.of(20L)));
+		when(mockTableManagerSupport.getAccessibleBenefactors(user, ObjectType.ENTITY, tableBenefactorsA1)).thenReturn(new HashSet<>(Set.of(30L, 40L)));
+
+		// call under test
+		List<BenefactorAccessFilter> result = manager.computeAccessibleBenefactors(user, indexDescription, mockTableIndexDAO);
+
+		assertEquals(2, result.size());
+		assertEquals("ROW_BENEFACTOR__A0", result.get(0).benefactorColumnName());
+		assertTrue(result.get(0).accessibleIds().contains(-1L));
+		assertTrue(result.get(0).accessibleIds().contains(20L));
+		assertEquals("ROW_BENEFACTOR__A1", result.get(1).benefactorColumnName());
+		assertTrue(result.get(1).accessibleIds().contains(-1L));
+		assertTrue(result.get(1).accessibleIds().contains(30L));
+		assertTrue(result.get(1).accessibleIds().contains(40L));
+	}
+
+	@Test
+	public void testComputeAccessibleBenefactorsIncludesMinusOneSentinel() {
+		IdAndVersion tableIdAndVersion = IdAndVersion.parse("syn123");
+		BenefactorDescription desc = new BenefactorDescription(TableConstants.ROW_BENEFACTOR, ObjectType.ENTITY);
+		IndexDescription indexDescription = Mockito.mock(IndexDescription.class);
+		when(indexDescription.getIdAndVersion()).thenReturn(tableIdAndVersion);
+		when(indexDescription.getBenefactors()).thenReturn(List.of(desc));
+
+		Set<Long> tableBenefactors = Sets.newHashSet(100L, 200L);
+		when(mockTableIndexDAO.getDistinctLongValues(tableIdAndVersion, TableConstants.ROW_BENEFACTOR)).thenReturn(tableBenefactors);
+		// accessible set does NOT contain -1 before computeAccessibleBenefactors adds it
+		when(mockTableManagerSupport.getAccessibleBenefactors(user, ObjectType.ENTITY, tableBenefactors)).thenReturn(new HashSet<>(Set.of(100L)));
+
+		// call under test
+		List<BenefactorAccessFilter> result = manager.computeAccessibleBenefactors(user, indexDescription, mockTableIndexDAO);
+
+		assertEquals(1, result.size());
+		assertTrue(result.get(0).accessibleIds().contains(-1L));
+		assertTrue(result.get(0).accessibleIds().contains(100L));
+	}
+
+	@Test
+	public void testComputeAccessibleBenefactorsWhenTableNotBuilt() {
+		IdAndVersion tableIdAndVersion = IdAndVersion.parse("syn123");
+		BenefactorDescription desc = new BenefactorDescription(TableConstants.ROW_BENEFACTOR, ObjectType.ENTITY);
+		IndexDescription indexDescription = Mockito.mock(IndexDescription.class);
+		when(indexDescription.getIdAndVersion()).thenReturn(tableIdAndVersion);
+		when(indexDescription.getBenefactors()).thenReturn(List.of(desc));
+
+		when(mockTableIndexDAO.getDistinctLongValues(tableIdAndVersion, TableConstants.ROW_BENEFACTOR))
+				.thenThrow(new BadSqlGrammarException("task", "sql", new java.sql.SQLException()));
+		// empty candidate set because table doesn't exist yet
+		when(mockTableManagerSupport.getAccessibleBenefactors(user, ObjectType.ENTITY, Collections.emptySet())).thenReturn(new HashSet<>());
+
+		// call under test — must not propagate BadSqlGrammarException
+		List<BenefactorAccessFilter> result = manager.computeAccessibleBenefactors(user, indexDescription, mockTableIndexDAO);
+
+		assertEquals(1, result.size());
+		assertTrue(result.get(0).accessibleIds().contains(-1L));
+	}
+
 	private RowSet createRowSetForTest(List<String> headerNames, List<String>... rowValues){
 		RowSet rowSet = new RowSet();
 		List<SelectColumn> headerObjects = new ArrayList<>();
@@ -2736,6 +3169,41 @@ public class TableQueryManagerImplTest {
 		rowSet.setRows(rows);
 		return rowSet;
 	}
-	
+
+	@Test
+	public void testQuerySinglePageWithViewReturnsBenefactorId() throws Exception {
+		when(mockTableManagerSupport.getTableStatusOrCreateIfNotExists(idAndVersion)).thenReturn(status);
+		setupNonExclusiveLock();
+		setupSnapshot(idAndVersion, TableType.entityview, models,
+				List.of(new BenefactorColumn().setBenefactorColumnName(TableConstants.ROW_BENEFACTOR)
+						.setBenefactorType(ObjectType.ENTITY.name())),
+				Collections.emptyList());
+		setupColumnModelAnswer(models);
+		when(mockTableConnectionFactory.getConnection(idAndVersion)).thenReturn(mockTableIndexDAO);
+		when(mockTableManagerSupport.validateTableReadAccess(any(), any())).thenReturn(AuthorizationStatus.authorized());
+		when(mockTableIndexDAO.getDistinctLongValues(any(), any())).thenReturn(benfactors);
+		when(mockTableManagerSupport.getAccessibleBenefactors(any(), any(), any())).thenReturn(subSet);
+
+		long benefactorId = 444L;
+		addRowIdAndVersionToRows();
+		rows.forEach(r -> r.setBenefactorId(benefactorId));
+
+		ArgumentCaptor<QueryTranslator> queryCaptor = ArgumentCaptor.forClass(QueryTranslator.class);
+		when(mockTableIndexDAO.query(queryCaptor.capture())).thenReturn(rowSet);
+
+		Query query = new Query();
+		query.setSql("select * from " + tableId);
+		queryOptions = new QueryOptions().withRunQuery(true).withRunCount(false).withReturnFacets(false);
+
+		// call under test
+		QueryResultBundle result = manager.querySinglePage(mockProgressCallbackVoid, user, query, queryOptions);
+
+		assertNotNull(result);
+		List<Row> resultRows = result.getQueryResult().getQueryResults().getRows();
+		assertNotNull(resultRows);
+		resultRows.forEach(r -> assertEquals(benefactorId, r.getBenefactorId()));
+		assertTrue(queryCaptor.getValue().getIncludeBenefactorId());
+	}
+
 }
 
